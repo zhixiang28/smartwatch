@@ -109,7 +109,7 @@ static void light_job(int ch)
             g_set.light_pin[0] = 0;
             store_save();
             ble_notify_status();
-            snprintf(s_l_detail, sizeof(s_l_detail), "mr 的 PIN 不对，请在手机重新设定");
+            snprintf(s_l_detail, sizeof(s_l_detail), "账号的 PIN 不对，请在手机网页重新登入");
         } else if (st >= 400) snprintf(s_l_detail, sizeof(s_l_detail), "服务器回应 %d：%.60s", st, buf);
         ESP_LOGI(TAG, "light set ch%d -> %d %s", ch, st, st == 200 ? buf : "");
     }
@@ -180,7 +180,7 @@ static void light_paint(void)
     }
     const char *msg = "点一下开关";
     if (!net_wifi_count()) msg = "手表还没记住任何 WiFi";
-    else if (!g_set.light_person[0] || !g_set.light_pin[0]) msg = "先在手机网页设定 mr 的 PIN";
+    else if (!g_set.light_person[0] || !g_set.light_pin[0]) msg = "先在手机网页登入账号";
     else if (s_l_busy) msg = net_wifi_connected() ? "连线中…" : "正在打开 WiFi…";
     else if (s_l_err == 2) msg = s_l_detail[0] ? s_l_detail : "钥匙不对，手表没有权限";
     else if (s_l_err == 1) msg = s_l_detail[0] ? s_l_detail : "连不上灯光服务器";
