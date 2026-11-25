@@ -104,7 +104,9 @@
       <div class="stat"><div class="k">连续达标</div><div class="v" id="streak">--</div></div>
       <div class="stat"><div class="k">30 天总距离</div><div class="v" id="dist30">--</div></div>
     </div>
-    <div class="card" style="margin-top:12px">
+    <div class="card" style="margin-top:12px"><h3>昨晚睡眠<b id="sleepTxt"></b></h3><svg id="sleepChart" width="100%" height="120" role="img" aria-label="昨晚睡眠"></svg>
+      <div class="note" style="margin:6px 0 0" id="sleepNote">戴着手表睡觉，手腕动得少就是睡得深</div></div>
+    <div class="card">
       <h3>小鱼</h3>
       <div class="it"><span class="k">饥饿</span><div class="bar"><b id="fHunger" style="background:var(--orange);width:0"></b></div></div>
       <div class="it"><span class="k">水的脏度</span><div class="bar"><b id="fDirt" style="background:#9acd32;width:0"></b></div></div>
@@ -141,7 +143,17 @@
       <div class="it"><label for="pass" class="k">密码</label><input id="pass" type="password" placeholder="没有就留空"></div>
       <div class="it" style="justify-content:flex-end"><button id="btnWifi" class="sec">加入手表</button></div>
     </div>
-    <p class="note">最多记住 6 个，只支持 2.4 GHz。</p>
+    <p class="note">最多记住 6 个，只支持 2.4 GHz。WiFi 平时关着，需要时（对时、天气、开灯）才会打开。</p>
+    <div class="hd">提醒</div>
+    <div class="card" style="padding:4px 16px">
+      <div class="it"><label class="k" for="rs">久坐提醒（1 小时没走动）</label><input type="checkbox" id="rs" style="flex:none;width:22px;height:22px"></div>
+      <div class="it"><label class="k" for="rw">喝水提醒（每 2 小时）</label><input type="checkbox" id="rw" style="flex:none;width:22px;height:22px"></div>
+    </div>
+    <div class="hd">办公室灯</div>
+    <div class="card" style="padding:4px 16px">
+      <div class="it"><label for="lkey" class="k">灯光钥匙</label><input id="lkey" type="password" placeholder="设备钥匙" autocomplete="off"><button id="btnKey" class="sec" style="height:36px">保存</button></div>
+    </div>
+    <p class="note" id="lkNote">在灯光系统里给手表新增一个设备，把钥匙贴在这里。</p>
     <div class="hd">其他</div>
     <div class="card" style="padding:4px 16px">
       <div class="it"><label for="goal" class="k">每日步数目标</label><input id="goal" inputmode="numeric" value="8000" style="max-width:90px"><button id="btnGoal" class="sec" style="height:36px">设定</button></div>
@@ -234,6 +246,16 @@ function render() {
   let st = 0; for (let d = today - 1; (db.days[d] || 0) >= goal; d--) st++; if (todaySteps >= goal) st++;
   $('streak').textContent = st + ' 天';
   $('dist30').textContent = (all30.reduce((a, b) => a + b, 0) * 0.7 / 1000).toFixed(1) + ' km';
+  const sl = db.sleep && db.sleep[today] ? db.sleep[today] : null;
+  if (sl) {
+    const lvl = sl.map(v => v === 0 ? 1 : v < 8 ? 2 : v < 30 ? 3 : 4);
+    const first = lvl.findIndex(l => l <= 2), last = lvl.length - 1 - [...lvl].reverse().findIndex(l => l <= 2);
+    const deep = lvl.filter(l => l === 1).length, light = lvl.filter(l => l === 2).length;
+    const mins = first >= 0 ? (last - first + 1) * 10 : 0;
+    $('sleepTxt').textContent = mins ? `约 ${Math.floor(mins / 60)} 小时 ${mins % 60} 分` : '';
+    $('sleepNote').textContent = mins ? `深睡约 ${Math.round(deep * 10 / 60 * 10) / 10} 小时 · 浅睡约 ${Math.round(light * 10 / 60 * 10) / 10} 小时 · ${2 + Math.floor(first / 6) > 23 ? '' : ''}${(22 + Math.floor(first / 6)) % 24}:${String(first % 6 * 10).padStart(2, '0')} 入睡` : '昨晚没有睡眠数据';
+    bars($('sleepChart'), lvl.map(l => 5 - l), lvl.map((_, i) => i % 12 === 0 ? ((22 + i / 6) % 24) + '时' : ''), v => ['#333', '#ff9f0a', '#5e8cff', '#3b5bdb', '#1e3a8a'][v] || '#333');
+  } else { $('sleepTxt').textContent = ''; $('sleepChart').innerHTML = ''; $('sleepNote').textContent = '戴着手表睡觉，早上同步就能看到'; }
   $('fHunger').style.width = (info.hunger || 0) + '%';
   $('fDirt').style.width = (info.dirt || 0) + '%';
 
@@ -266,6 +288,13 @@ function render() {
 }
 render();
 addEventListener('resize', render);
+const qcode = new URLSearchParams(location.search).get('code');
+if (qcode && /^\d{4}$/.test(qcode)) {
+  localStorage.setItem('fw_code', qcode);
+  history.replaceState(null, '', location.pathname);
+  setState('已读取配对码 ' + qcode + ' · 点"连接"', 'ok');
+  $('btnConn').style.boxShadow = '0 0 0 4px rgba(10,132,255,.35)';
+}
 
 /* ---------- Bluetooth ---------- */
 function setState(t, cls) { $('st').textContent = t; $('st').style.color = cls === 'ok' ? 'var(--green)' : cls === 'warn' ? 'var(--orange)' : 'var(--dim)'; }
@@ -300,6 +329,7 @@ async function pair() {
     ch.CMD.addEventListener('characteristicvaluechanged', e => { const m = dec.decode(e.target.value); if (m === 'find') startRing(); else if (m === 'find_stop') stopRing(); });
     await syncTime();
     sendLocation();
+    write('CMD', 'url:' + location.origin + location.pathname).catch(() => {});
     showStatus(dec.decode(await ch.STATUS.readValue()));
     await syncData();
   } catch (e) {
@@ -331,6 +361,7 @@ async function syncData() {
         else if (o.t === 'day') db.days[o.day] = o.steps;
         else if (o.t === 'set' && o.ts) db.sets[o.ts + '_' + o.lift] = o;
         else if (o.t === 'pr') db.pr[o.lift] = o.kg;
+        else if (o.t === 'sleep') { db.sleep = db.sleep || {}; db.sleep[o.day] = o.m; }
       } catch (e) { log('坏数据：' + line.slice(0, 40)); }
     }
   };
@@ -338,16 +369,32 @@ async function syncData() {
 }
 
 async function syncTime() { await write('TIME', `${Math.floor(Date.now() / 1000)},${-new Date().getTimezoneOffset()}`); log('已对时'); }
+/* the phone fetches the weather with its own internet and hands it to the watch,
+   so the watch doesn't have to turn on WiFi */
+async function pushWeather(lat, lon) {
+  try {
+    const r = await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current=temperature_2m,relative_humidity_2m,weather_code&daily=temperature_2m_max,temperature_2m_min&timezone=auto&forecast_days=1`);
+    const j = await r.json();
+    await write('CMD', `wx:${j.current.temperature_2m},${j.current.weather_code},${j.daily.temperature_2m_max[0]},${j.daily.temperature_2m_min[0]},${j.current.relative_humidity_2m}`);
+    log('已把天气传给手表');
+  } catch (e) { log('天气失败：' + e.message); }
+}
 function sendLocation() {
-  if (!ch.LOC || !navigator.geolocation) return;
-  navigator.geolocation.getCurrentPosition(p => write('LOC', `${p.coords.latitude.toFixed(3)},${p.coords.longitude.toFixed(3)}`).then(() => log('已同步位置（天气用）')).catch(() => {}),
-    () => log('没有位置权限，天气默认新加坡'), { timeout: 8000 });
+  const fallback = () => pushWeather(1.29, 103.85);
+  if (!navigator.geolocation) return fallback();
+  navigator.geolocation.getCurrentPosition(p => {
+    const la = p.coords.latitude.toFixed(3), lo = p.coords.longitude.toFixed(3);
+    if (ch.LOC) write('LOC', `${la},${lo}`).catch(() => {});
+    pushWeather(la, lo);
+  }, () => { log('没有位置权限，天气用新加坡'); fallback(); }, { timeout: 8000 });
 }
 
 function showStatus(txt) {
   let s; try { s = JSON.parse(txt); } catch { return; }
   $('sBatt').textContent = s.batt >= 0 ? `${s.batt}%${s.chg ? ' · 充电中' : ''}` : '--';
-  $('sWifi').innerHTML = s.wifi ? `<span class="chip ok">${s.ssid}</span>` : (s.nets && s.nets.length ? '<span class="chip warn">找网络中</span>' : '未设定');
+  $('sWifi').innerHTML = s.wifi ? `<span class="chip ok">${s.ssid}</span>` : (s.nets && s.nets.length ? `<span class="chip">平时关着 · 记住 ${s.nets.length} 个</span>` : '未设定');
+  if ('rs' in s) { $('rs').checked = !!s.rs; $('rw').checked = !!s.rw; }
+  if ('lk' in s) $('lkNote').textContent = s.lk ? '手表已经有灯光钥匙。' : '在灯光系统里给手表新增一个设备，把钥匙贴在这里。';
   $('sTime').innerHTML = s.time ? '<span class="chip ok">已对时</span>' : '<span class="chip warn">未对时</span>';
   if (s.nets) {
     $('netList').innerHTML = s.nets.length ? s.nets.map(n => `<div class="it"><span class="k">${n}${s.wifi && s.ssid === n ? ' <span class="chip ok">已连接</span>' : ''}</span><button class="del" data-n="${encodeURIComponent(n)}">删除</button></div>`).join('') : '<div class="empty">还没有记住任何 WiFi</div>';
@@ -363,6 +410,9 @@ $('btnWifi').onclick = async () => {
 };
 $('btnGoal').onclick = () => { const g = parseInt($('goal').value); if (g >= 1000) write('CMD', 'goal:' + g).then(() => { if (db.info) db.info.goal = g; saveDb(); render(); log('目标已设定'); }).catch(e => log(e.message)); };
 $('btnTime').onclick = () => syncTime().catch(e => log(e.message));
+const sendRemind = () => write('CMD', 'remind:' + ($('rs').checked ? 1 : 0) + ($('rw').checked ? 1 : 0)).then(() => log('提醒已更新')).catch(e => log(e.message));
+$('rs').onchange = sendRemind; $('rw').onchange = sendRemind;
+$('btnKey').onclick = () => { const k = $('lkey').value.trim(); if (k) write('CMD', 'lightkey:' + k).then(() => { $('lkey').value = ''; log('灯光钥匙已保存到手表'); }).catch(e => log(e.message)); };
 $('btnBuzz').onclick = () => write('CMD', 'buzz').catch(e => log(e.message));
 $('btnClear').onclick = () => { if (confirm('清除手机上保存的健康和训练数据？手表上的数据不受影响。')) { localStorage.removeItem(DB_KEY); location.reload(); } };
 
