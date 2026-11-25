@@ -29,6 +29,7 @@ static const ble_uuid128_t UUID_STATUS = FW_UUID(0x05);
 static const ble_uuid128_t UUID_CMD = FW_UUID(0x06);
 static const ble_uuid128_t UUID_LOC = FW_UUID(0x07);
 static const ble_uuid128_t UUID_DATA = FW_UUID(0x08);
+static const ble_uuid128_t UUID_NOTIF = FW_UUID(0x09);   /* phone notification: "app\ntitle\ntext" */
 
 static uint16_t s_conn = BLE_HS_CONN_HANDLE_NONE;
 
@@ -105,7 +106,14 @@ static int64_t s_idle_since;
 bool ble_connected(void) { return s_conn != BLE_HS_CONN_HANDLE_NONE; }
 bool ble_authed(void) { return s_authed && ble_connected(); }
 uint16_t ble_pair_code(void) { return s_code; }
-void ble_new_code(void) { s_code = 1000 + esp_random() % 9000; s_authed = false; }
+/* The code is made once and kept: the Android notification app connects in the background
+ * and can't ask for a new code every time Bluetooth is switched on. */
+void ble_new_code(void)
+{
+    if (g_set.pair_code < 1000 || g_set.pair_code > 9999) { g_set.pair_code = 1000 + esp_random() % 9000; store_save(); }
+    s_code = g_set.pair_code;
+    s_authed = false;
+}
 
 static void status_async(void *arg) { ui_status_changed(); }
 static void ui_kick(void) { if (ui_lock(200)) { lv_async_call(status_async, NULL); ui_unlock(); } }
@@ -223,7 +231,7 @@ static int flat(struct ble_gatt_access_ctxt *ctxt, char *buf, int max)
 static int access_cb(uint16_t conn, uint16_t attr, struct ble_gatt_access_ctxt *ctxt, void *arg)
 {
     int which = (int)(intptr_t)arg;
-    char buf[200];
+    char buf[600];
     if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) {
         if (which == 5) {
             char *js = malloc(STATUS_MAX);
@@ -257,6 +265,12 @@ static int access_cb(uint16_t conn, uint16_t attr, struct ble_gatt_access_ctxt *
         if (nl) *nl = 0;
         if (!net_wifi_test(buf, nl ? nl + 1 : "", wifi_test_done)) wifi_test_done(false, buf, "上一个 WiFi 还在连，等一下再加");
         ui_kick();
+    } else if (which == 9) {                           /* NOTIF from the Android app */
+        char *t1 = strchr(buf, '\n'), *t2 = t1 ? strchr(t1 + 1, '\n') : NULL;
+        if (t1) *t1 = 0;
+        if (t2) *t2 = 0;
+        notif_push(buf, t1 ? t1 + 1 : "", t2 ? t2 + 1 : "");
+        return 0;                                      /* no status notify for every message */
     } else if (which == 7) {                           /* LOC: "lat,lon" from the phone's GPS */
         float lat, lon;
         if (sscanf(buf, "%f,%f", &lat, &lon) == 2) { g_set.lat = lat; g_set.lon = lon; store_save(); net_weather_refresh(); }
@@ -314,6 +328,7 @@ static const struct ble_gatt_svc_def s_svcs[] = {
             { .uuid = &UUID_CMD.u, .access_cb = access_cb, .arg = (void *)6, .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_NOTIFY, .val_handle = &s_cmd_h },
             { .uuid = &UUID_LOC.u, .access_cb = access_cb, .arg = (void *)7, .flags = BLE_GATT_CHR_F_WRITE },
             { .uuid = &UUID_DATA.u, .access_cb = access_cb, .arg = (void *)8, .flags = BLE_GATT_CHR_F_NOTIFY, .val_handle = &s_data_h },
+            { .uuid = &UUID_NOTIF.u, .access_cb = access_cb, .arg = (void *)9, .flags = BLE_GATT_CHR_F_WRITE },
             { 0 }
         },
     },
@@ -482,7 +497,7 @@ void ble_stop(void)
 
 void ble_poll(void)
 {
-    if (s_on && !ble_connected() && esp_timer_get_time() - s_idle_since > 180LL * 1000000) ble_stop();
+    if (s_on && !g_set.notif_on && !ble_connected() && esp_timer_get_time() - s_idle_since > 180LL * 1000000) ble_stop();
 }
 
 void ble_init(void)

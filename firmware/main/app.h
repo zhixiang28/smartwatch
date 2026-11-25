@@ -64,6 +64,8 @@ typedef struct {
     char xz_url[128];       /* websocket URL the server gave us */
     char xz_token[200];
     char xz_uuid[40];       /* our Client-Id, made once */
+    uint16_t pair_code;     /* kept, so the phone page / Android app needn't re-enter it */
+    uint8_t notif_on;       /* keep Bluetooth on for the Android notification app */
 } settings_t;
 
 typedef struct { bool ok; float temp, tmax, tmin; int code, hum; char upd[8]; } weather_t;
@@ -219,6 +221,8 @@ void app_game(lv_obj_t *root);
 void app_camera(lv_obj_t *root);
 void app_radio(lv_obj_t *root);
 void app_xiaozhi(lv_obj_t *root);
+void app_notif(lv_obj_t *root);
+void notif_push(const char *app, const char *title, const char *text);   /* any task */
 void app_translate(lv_obj_t *root);
 int xz_state(void);                /* see xiaozhi.c, for the phone page */
 const char *xz_code(void);         /* pending activation code, "" if none */

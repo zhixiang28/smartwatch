@@ -39,7 +39,7 @@ static const app_def_t APPS[] = {
     {"表盘", CAT_SYS, &img_icon_fc, app_faces, NULL},
     {"手机设定", CAT_SYS, &img_icon_ph, app_phone, NULL},
     {"设置", CAT_SYS, &img_icon_se, app_settings, NULL},
-    {"通知", CAT_SYS, &img_icon_no, NULL, "显示手机通知，下一版加入。"},
+    {"通知", CAT_SYS, &img_icon_no, app_notif, NULL},
     {"滚滚鱼", CAT_MED, &img_icon_fish, app_game, NULL},
 };
 #define NAPPS (sizeof(APPS) / sizeof(APPS[0]))

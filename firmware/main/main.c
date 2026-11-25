@@ -65,6 +65,7 @@ void app_main(void)
         snprintf(t, sizeof(t), "上次重启不正常（%s）%s", diag_reset_reason(), diag_has_dump() ? "，连手机看原因" : "");
         if (ui_lock(1000)) { ui_toast(t); ui_unlock(); }
     }
+    if (g_set.notif_on) ble_start();     /* the notification app reconnects by itself */
     hw_haptic(40);
     xTaskCreate(stable_task, "stable", 4096, NULL, 2, NULL);
 }
