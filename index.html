@@ -450,8 +450,10 @@ if (!standalone && /iphone|ipad|ipod/i.test(navigator.userAgent)) $('iosTip').st
 let scanStream, scanTimer, detector;
 function codeFromQr(t) {
   t = (t || '').trim();
+  let m = t.match(/^FISHWATCH:\s*(\d{4})$/i);   // what the watch shows
+  if (m) return m[1];
   if (/^\d{4}$/.test(t)) return t;
-  const m = t.match(/[?&#]code=(\d{4})(?!\d)/);
+  m = t.match(/[?&#]code=(\d{4})(?!\d)/);
   return m ? m[1] : null;
 }
 function loadJsQR() {
