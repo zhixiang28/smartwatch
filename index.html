@@ -165,16 +165,16 @@
       <div class="it"><label class="k" for="rs">久坐提醒（1 小时没走动）</label><input type="checkbox" id="rs" style="flex:none;width:22px;height:22px"></div>
       <div class="it"><label class="k" for="rw">喝水提醒（每 2 小时）</label><input type="checkbox" id="rw" style="flex:none;width:22px;height:22px"></div>
     </div>
-    <div class="hd">办公室灯（用 mr 账号）</div>
+    <div class="hd">办公室灯</div>
     <div class="card" style="padding:4px 16px" id="mrIn" hidden>
       <div class="it"><span class="k">已登入</span><span class="v" id="mrWho">--</span><button id="btnMrOut" class="del">登出</button></div>
     </div>
     <div class="card" style="padding:4px 16px" id="mrForm">
-      <div class="it"><label for="mrEmail" class="k">Email</label><input id="mrEmail" type="email" inputmode="email" placeholder="mr 账号的 email" autocomplete="username"></div>
-      <div class="it"><label for="mrPin" class="k">PIN</label><input id="mrPin" type="password" inputmode="numeric" placeholder="mr 的 PIN" autocomplete="current-password"></div>
+      <div class="it"><label for="mrEmail" class="k">Email</label><input id="mrEmail" type="email" inputmode="email" placeholder="账号的 email" autocomplete="username"></div>
+      <div class="it"><label for="mrPin" class="k">PIN</label><input id="mrPin" type="password" inputmode="numeric" placeholder="账号的 PIN" autocomplete="current-password"></div>
       <div class="it" style="justify-content:flex-end"><button id="btnMrIn" class="sec">登入并存到手表</button></div>
     </div>
-    <p class="note" id="mrNote">手机先向 mr 确认 email 和 PIN，对了才存到手表。手表开灯时用这个账号。</p>
+    <p class="note" id="mrNote">手机先确认 email 和 PIN，对了才存到手表。手表开灯时用这个账号。</p>
     <div class="hd">小智 AI 助手</div>
     <div class="card" style="padding:4px 16px">
       <div class="it"><span class="k">状态</span><span class="v" id="xzSt">--</span></div>
@@ -630,14 +630,14 @@ function mrShow(on) {
   const name = localStorage.getItem('mr_name');
   $('mrIn').hidden = !on; $('mrForm').hidden = !!on;
   $('mrWho').textContent = name || '（手表上有账号）';
-  if (!on && name) $('mrNote').textContent = '手表上的 mr 账号已失效（PIN 可能改了），请重新登入。';
+  if (!on && name) $('mrNote').textContent = '手表上的账号已失效（PIN 可能改了），请重新登入。';
 }
 $('btnMrIn').onclick = async () => {
   const email = $('mrEmail').value.trim(), pin = $('mrPin').value;
   if (!email) { $('mrEmail').focus(); return; }
   if (!pin) { $('mrPin').focus(); return; }
   if (!paired) { $('mrNote').textContent = '先连接手表。'; return; }
-  $('btnMrIn').disabled = true; $('mrNote').textContent = '向 mr 确认中…';
+  $('btnMrIn').disabled = true; $('mrNote').textContent = '确认中…';
   try {
     const r = await fetch(MR_URL + '/rest/v1/rpc/login_by_email', {
       method: 'POST', headers: { apikey: MR_KEY, 'Content-Type': 'application/json' },
@@ -655,12 +655,12 @@ $('btnMrIn').onclick = async () => {
     $('mrPin').value = '';
     $('mrNote').textContent = '✓ 已登入 ' + (j.name || email) + '，手表可以开灯了。';
     mrShow(true);
-    log('mr 账号已存到手表：' + (j.name || email));
+    log('账号已存到手表：' + (j.name || email));
   } catch (e) { $('mrNote').textContent = '✗ ' + e.message; }
   finally { $('btnMrIn').disabled = false; }
 };
 $('btnMrOut').onclick = async () => {
-  try { await write('CMD', 'lightout'); localStorage.removeItem('mr_name'); mrShow(false); $('mrNote').textContent = '已登出，手表不能开灯了。'; log('mr 账号已从手表移除'); }
+  try { await write('CMD', 'lightout'); localStorage.removeItem('mr_name'); mrShow(false); $('mrNote').textContent = '已登出，手表不能开灯了。'; log('账号已从手表移除'); }
   catch (e) { log(e.message); }
 };
 $('btnBuzz').onclick = () => write('CMD', 'buzz').catch(e => log(e.message));
