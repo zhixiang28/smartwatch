@@ -33,6 +33,8 @@ static const ble_uuid128_t UUID_NOTIF = FW_UUID(0x09);   /* phone notification: 
 
 static uint16_t s_conn = BLE_HS_CONN_HANDLE_NONE;
 
+static bool s_inited;                 /* defined again below (tentative definition) */
+
 /* ---- Remote shutter: standard HID over GATT (consumer control). Android's camera takes a
  * photo on Volume Up from any keyboard / remote, so no app is needed. HID needs a bonded,
  * encrypted link; the bond is kept in NVS (CONFIG_BT_NIMBLE_NVS_PERSIST). ---- */
@@ -78,6 +80,7 @@ static int hid_access(uint16_t conn, uint16_t attr, struct ble_gatt_access_ctxt 
 bool ble_hid_ready(void) { return ble_connected() && s_encrypted && s_hid_sub; }
 bool ble_hid_bonded(void)
 {
+    if (!s_inited) return false;
     int n = 0;
     ble_store_util_count(BLE_STORE_OBJ_TYPE_OUR_SEC, &n);
     return n > 0;
@@ -369,6 +372,7 @@ static const struct ble_gatt_svc_def s_svcs[] = {
 };
 
 static void advertise(void);
+static void ble_lazy_init(void);
 
 static int gap_cb(struct ble_gap_event *ev, void *arg)
 {
@@ -508,7 +512,12 @@ void ble_poll(void)
     if (s_on && !g_set.notif_on && !ble_connected() && esp_timer_get_time() - s_idle_since > 180LL * 1000000) ble_stop();
 }
 
+/* The NimBLE stack + controller are brought up at boot, while internal RAM is still in one piece
+ * and from the main task's 16 KB stack. Doing it on the first "turn Bluetooth on" tap ran it
+ * on the UI task, and the first time after power-on the watch rebooted. It only advertises
+ * once switched on. */
 void ble_init(void)
 {
     ble_new_code();
+    if (!g_safe_mode) ble_lazy_init();
 }

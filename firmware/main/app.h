@@ -66,6 +66,7 @@ typedef struct {
     char xz_uuid[40];       /* our Client-Id, made once */
     uint16_t pair_code;     /* kept, so the phone page / Android app needn't re-enter it */
     uint8_t notif_on;       /* keep Bluetooth on for the Android notification app */
+    uint8_t tap_buzz;       /* vibrate on button taps (off by default: the click sound is enough) */
 } settings_t;
 
 typedef struct { bool ok; float temp, tmax, tmin; int code, hum; char upd[8]; } weather_t;

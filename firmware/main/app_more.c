@@ -2,6 +2,8 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <stdlib.h>
+#include <dirent.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_heap_caps.h"
@@ -246,6 +248,8 @@ void alarm_check(void)
 static int16_t *s_rec;
 static volatile int s_rec_len;            /* samples */
 static volatile bool s_recording, s_playing;
+static int s_old_ids[200], s_old_n, s_old_i = -1;   /* older recordings on the SD card */
+static char s_old_name[24];
 static lv_obj_t *s_rec_lbl, *s_rec_dot, *s_rec_state;
 static lv_timer_t *s_rec_tm;
 
@@ -304,18 +308,59 @@ static void rec_paint(lv_timer_t *t)
     lv_obj_set_size(s_rec_dot, s_recording ? 34 : 60, s_recording ? 34 : 60);
     lv_obj_set_style_radius(s_rec_dot, s_recording ? 8 : 30, 0);
     lv_obj_center(s_rec_dot);
-    lv_label_set_text(s_rec_state, s_recording ? "录音中…" : s_playing ? "播放中…" : s_rec_len ? (store_sd_ok() ? "已存到 SD 卡" : "没有 SD 卡，只能先听") : "点红色按钮开始");
+    char st[48];
+    if (s_recording) snprintf(st, sizeof(st), "录音中…");
+    else if (s_playing) snprintf(st, sizeof(st), "播放中… %s", s_old_name);
+    else if (s_rec_len) snprintf(st, sizeof(st), "%s", store_sd_ok() ? "已存到 SD 卡" : "没有 SD 卡，只能先听");
+    else snprintf(st, sizeof(st), "点红色按钮开始");
+    lv_label_set_text(s_rec_state, st);
 }
 
 static void rec_toggle(lv_event_t *e)
 {
     if (s_playing) return;
-    if (s_recording) { s_recording = false; vTaskDelay(pdMS_TO_TICKS(120)); save_wav(); }
+    if (s_recording) { s_recording = false; vTaskDelay(pdMS_TO_TICKS(120)); save_wav(); if (store_sd_ok()) sound_play(SND_CLEAN); }
     else {
+        s_old_i = -1;                                   /* the list changes: start from the newest again */
+        s_old_name[0] = 0;
         s_recording = true;
         if (xTaskCreatePinnedToCore(rec_task, "rec", 8192, NULL, 4, NULL, 1) != pdPASS) s_recording = false;
     }
     rec_paint(NULL);
+}
+
+/* ---- older recordings on the SD card: each tap goes one further back and plays it ---- */
+static int old_cmp(const void *a, const void *b) { return *(const int *)b - *(const int *)a; }
+static void rec_play(lv_event_t *e);
+static void rec_old(lv_event_t *e)
+{
+    if (s_recording || s_playing) return;
+    if (!store_sd_ok()) { ui_toast("没有 SD 卡"); return; }
+    if (s_old_i < 0) {                                  /* first tap: list them */
+        s_old_n = 0;
+        DIR *d = opendir(BSP_SD_MOUNT_POINT "/fishwatch/rec");
+        struct dirent *de;
+        while (d && (de = readdir(d)) && s_old_n < 200) {
+            int id;
+            if (sscanf(de->d_name, "rec%d.wav", &id) == 1 || sscanf(de->d_name, "REC%d.WAV", &id) == 1) s_old_ids[s_old_n++] = id;
+        }
+        if (d) closedir(d);
+        qsort(s_old_ids, s_old_n, sizeof(int), old_cmp);
+    }
+    if (!s_old_n) { ui_toast("还没有录过音"); return; }
+    s_old_i = (s_old_i + 1) % s_old_n;
+    char path[80];
+    snprintf(path, sizeof(path), BSP_SD_MOUNT_POINT "/fishwatch/rec/rec%03d.wav", s_old_ids[s_old_i]);
+    FILE *f = fopen(path, "rb");
+    if (!f) { ui_toast("打不开"); return; }
+    uint8_t h[44];
+    size_t n = fread(h, 1, 44, f);
+    s_rec_len = 0;
+    if (n == 44 && !memcmp(h, "RIFF", 4) && !memcmp(h + 36, "data", 4))
+        s_rec_len = fread(s_rec, 2, REC_RATE * REC_MAX_S, f);
+    fclose(f);
+    snprintf(s_old_name, sizeof(s_old_name), "rec%03d", s_old_ids[s_old_i]);
+    rec_play(NULL);
 }
 
 static void rec_play(lv_event_t *e)
@@ -355,9 +400,14 @@ void app_recorder(lv_obj_t *root)
     lv_obj_set_style_border_width(s_rec_dot, 0, 0);
     lv_obj_remove_flag(s_rec_dot, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(b, rec_toggle, LV_EVENT_CLICKED, NULL);
-    lv_obj_t *p = ui_pill_btn(root, "播放刚才的录音", C_CARD, 0xFCA5A5, 366, 62);
+    lv_obj_t *p = ui_pill_btn(root, "播放", C_CARD, 0xFCA5A5, 178, 62);
     lv_obj_set_pos(p, 22, 404);
     lv_obj_add_event_cb(p, rec_play, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *o = ui_pill_btn(root, "旧录音", C_CARD, 0xFCA5A5, 178, 62);      /* older ones on the SD card */
+    lv_obj_set_pos(o, 210, 404);
+    lv_obj_add_event_cb(o, rec_old, LV_EVENT_CLICKED, NULL);
+    s_old_i = -1;
+    s_old_name[0] = 0;
     rec_paint(NULL);
     s_rec_tm = lv_timer_create(rec_paint, 300, NULL);
     power_keep_awake(true);

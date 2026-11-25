@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 set(LVGL_VERSION 9.5.0)
 set(ENV{LVGL_VERSION} 9.5.0)
-set(PROJECT_VER "0.8.4")
+set(PROJECT_VER "0.8.5")
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(fishwatch)

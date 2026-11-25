@@ -32,7 +32,7 @@ lv_obj_t *ui_icon(lv_obj_t *parent, const lv_image_dsc_t *img, uint32_t color)
 
 static void press_anim_cb(lv_event_t *e)
 {
-    if (lv_event_get_code(e) == LV_EVENT_CLICKED) { hw_haptic(12); sound_play(SND_CLICK); }
+    if (lv_event_get_code(e) == LV_EVENT_CLICKED) { if (g_set.tap_buzz) hw_haptic(12); sound_play(SND_CLICK); }
 }
 
 lv_obj_t *ui_pill_btn(lv_obj_t *parent, const char *txt, uint32_t bg, uint32_t fg, int w, int h)
@@ -155,7 +155,7 @@ static void edge_cb(lv_event_t *e)
         lv_obj_set_pos(ind, x - 56, p.y - 28);
         lv_obj_set_style_bg_opa(ind, x * 255 / 90, 0);
         lv_obj_set_style_bg_color(ind, lv_color_hex(dx >= 80 ? C_TEAL : 0x3A3A3C), 0);
-        if (dx >= 80 && !s_edge_fired) { s_edge_fired = true; hw_haptic(15); }
+        if (dx >= 80 && !s_edge_fired) { s_edge_fired = true; if (g_set.tap_buzz) hw_haptic(15); }
     } else if (c == LV_EVENT_RELEASED || c == LV_EVENT_PRESS_LOST) {
         lv_obj_set_pos(ind, -60, 0);
         if (s_edge_fired) { sound_play(SND_CLICK); lv_async_call((lv_async_cb_t)ui_back, NULL); }

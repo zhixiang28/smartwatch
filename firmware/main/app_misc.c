@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 #include "esp_heap_caps.h"
 #include "esp_timer.h"
 #include "bsp/esp-bsp.h"
@@ -21,7 +22,9 @@ static bool s_has_prev;
 static lv_obj_t *s_sw[4];
 static const uint32_t PENS[4] = {0xFFF8E6, 0xFCD34D, 0x5EEAD4, 0xF9A8D4};
 
-static void notes_close(void) { if (s_note_buf) { heap_caps_free(s_note_buf); s_note_buf = NULL; } }
+static lv_obj_t *s_nv;                /* note viewer overlay (below) */
+static uint16_t *s_nv_buf;
+static void notes_close(void) { if (s_note_buf) { heap_caps_free(s_note_buf); s_note_buf = NULL; } s_nv = NULL; if (s_nv_buf) { heap_caps_free(s_nv_buf); s_nv_buf = NULL; } }
 
 static void draw_cb(lv_event_t *e)
 {
@@ -62,9 +65,113 @@ static void save_cb(lv_event_t *e)
     char name[32];
     if (store_save_note_bmp(s_note_buf, NOTE_W, NOTE_H, name, sizeof(name))) {
         char msg[64];
-        snprintf(msg, sizeof(msg), "已存 %s", name);
+        snprintf(msg, sizeof(msg), "已存 %s · 右上角「看」可以打开", name);
         ui_toast(msg);
+        sound_play(SND_CLEAN);                         /* a chime instead of buzzing */
     } else ui_toast("没有 SD 卡，存不了");
+}
+
+/* ---- note viewer: the BMPs saved on the SD card ---- */
+#include <dirent.h>
+static lv_obj_t *s_nv_canvas, *s_nv_name;
+static int s_nv_ids[200], s_nv_n, s_nv_i;
+
+static int nv_cmp(const void *a, const void *b) { return *(const int *)b - *(const int *)a; }   /* newest first */
+static void nv_scan(void)
+{
+    s_nv_n = 0;
+    DIR *d = opendir(BSP_SD_MOUNT_POINT "/fishwatch/notes");
+    if (!d) return;
+    struct dirent *e;
+    while ((e = readdir(d)) && s_nv_n < 200) {
+        int id;
+        if (sscanf(e->d_name, "note%d.bmp", &id) == 1 || sscanf(e->d_name, "NOTE%d.BMP", &id) == 1) s_nv_ids[s_nv_n++] = id;
+    }
+    closedir(d);
+    qsort(s_nv_ids, s_nv_n, sizeof(int), nv_cmp);
+}
+
+static bool nv_load(int id)
+{
+    char path[80];
+    snprintf(path, sizeof(path), BSP_SD_MOUNT_POINT "/fishwatch/notes/note%03d.bmp", id);
+    FILE *f = fopen(path, "rb");
+    if (!f) return false;
+    uint8_t h[54];
+    bool ok = fread(h, 1, 54, f) == 54 && h[0] == 'B' && h[1] == 'M' && h[28] == 24;
+    int32_t w = h[18] | h[19] << 8 | h[20] << 16 | h[21] << 24, hh = h[22] | h[23] << 8 | h[24] << 16 | h[25] << 24;
+    uint32_t off = h[10] | h[11] << 8 | h[12] << 16 | h[13] << 24;
+    if (ok && w > 0 && w <= NOTE_W && hh > 0 && hh <= NOTE_H) {
+        int row = (w * 3 + 3) & ~3;
+        uint8_t *line = malloc(row);
+        memset(s_nv_buf, 0, NOTE_W * NOTE_H * 2);
+        fseek(f, off, SEEK_SET);
+        for (int y = hh - 1; line && y >= 0; y--) {          /* bottom-up rows, BGR */
+            if (fread(line, 1, row, f) != (size_t)row) break;
+            for (int x = 0; x < w; x++) {
+                uint8_t B = line[x * 3], G = line[x * 3 + 1], R = line[x * 3 + 2];
+                s_nv_buf[y * NOTE_W + x] = (R >> 3) << 11 | (G >> 2) << 5 | (B >> 3);
+            }
+        }
+        free(line);
+    } else ok = false;
+    fclose(f);
+    return ok;
+}
+
+static void nv_show(void)
+{
+    if (!s_nv_n) { lv_label_set_text(s_nv_name, store_sd_ok() ? "还没有存过笔记" : "没有 SD 卡"); lv_obj_add_flag(s_nv_canvas, LV_OBJ_FLAG_HIDDEN); return; }
+    if (s_nv_i >= s_nv_n) s_nv_i = s_nv_n - 1;
+    if (s_nv_i < 0) s_nv_i = 0;
+    bool ok = nv_load(s_nv_ids[s_nv_i]);
+    lv_label_set_text_fmt(s_nv_name, ok ? "note%03d · %d / %d" : "note%03d 打不开 · %d / %d", s_nv_ids[s_nv_i], s_nv_i + 1, s_nv_n);
+    lv_obj_remove_flag(s_nv_canvas, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_invalidate(s_nv_canvas);
+}
+static void nv_step(lv_event_t *e) { s_nv_i += (int)(intptr_t)lv_event_get_user_data(e); nv_show(); }
+static void nv_del(lv_event_t *e)
+{
+    if (!s_nv_n) return;
+    char path[80];
+    snprintf(path, sizeof(path), BSP_SD_MOUNT_POINT "/fishwatch/notes/note%03d.bmp", s_nv_ids[s_nv_i]);
+    remove(path);
+    ui_toast("已删除");
+    nv_scan();
+    nv_show();
+}
+static void nv_close(lv_event_t *e)
+{
+    if (s_nv) { lv_obj_delete(s_nv); s_nv = NULL; }
+    if (s_nv_buf) { heap_caps_free(s_nv_buf); s_nv_buf = NULL; }
+}
+static void nv_open(lv_event_t *e)
+{
+    if (s_nv) return;
+    s_nv_buf = heap_caps_malloc(NOTE_W * NOTE_H * 2, MALLOC_CAP_SPIRAM);
+    if (!s_nv_buf) { ui_toast("内存不足"); return; }
+    s_nv = lv_obj_create(lv_obj_get_parent(lv_obj_get_parent(lv_event_get_target(e))));   /* covers the whole screen */
+    lv_obj_set_size(s_nv, SCR_W, SCR_H);
+    lv_obj_set_style_bg_color(s_nv, lv_color_black(), 0);
+    lv_obj_set_style_border_width(s_nv, 0, 0);
+    lv_obj_set_style_radius(s_nv, 0, 0);
+    lv_obj_set_style_pad_all(s_nv, 0, 0);
+    lv_obj_remove_flag(s_nv, LV_OBJ_FLAG_SCROLLABLE);
+    s_nv_name = ui_label(s_nv, &font_cn16, 0xFCD34D, "");
+    lv_obj_align(s_nv_name, LV_ALIGN_TOP_MID, 0, 40);
+    s_nv_canvas = lv_canvas_create(s_nv);
+    lv_canvas_set_buffer(s_nv_canvas, s_nv_buf, NOTE_W, NOTE_H, LV_COLOR_FORMAT_RGB565);
+    lv_obj_set_pos(s_nv_canvas, 22, 74);
+    static const char *L[4] = {"上一张", "下一张", "删除", "关闭"};
+    for (int i = 0; i < 4; i++) {
+        lv_obj_t *b = ui_pill_btn(s_nv, L[i], i == 2 ? 0x3A1515 : C_CARD, i == 2 ? 0xF87171 : 0xFCD34D, 86, 56);
+        lv_obj_set_pos(b, 22 + i * 93, 418);
+        if (i < 2) lv_obj_add_event_cb(b, nv_step, LV_EVENT_CLICKED, (void *)(intptr_t)(i ? 1 : -1));
+        else lv_obj_add_event_cb(b, i == 2 ? nv_del : nv_close, LV_EVENT_CLICKED, NULL);
+    }
+    nv_scan();
+    s_nv_i = 0;
+    nv_show();
 }
 
 void app_notes(lv_obj_t *root)
@@ -103,6 +210,9 @@ void app_notes(lv_obj_t *root)
     lv_obj_t *sv = ui_pill_btn(root, "保存", 0xFCD34D, 0x2A1F00, 76, 50);
     lv_obj_set_pos(sv, 312, 424);
     lv_obj_add_event_cb(sv, save_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *vw = ui_pill_btn(root, "看", C_CARD, 0xFCD34D, 76, 50);   /* open saved notes */
+    lv_obj_set_pos(vw, 312, 18);
+    lv_obj_add_event_cb(vw, nv_open, LV_EVENT_CLICKED, NULL);
 }
 
 /* =============== Phone settings (pairing code + QR) =============== */
@@ -325,18 +435,22 @@ void app_findphone(lv_obj_t *root)
 }
 
 /* =============== Settings / about =============== */
-static lv_obj_t *s_to_lbl, *s_rem_lbl[2];
+static lv_obj_t *s_to_lbl, *s_rem_lbl[3];
 static void remind_paint(void)
 {
     lv_label_set_text(s_rem_lbl[0], g_set.remind_sit ? "久坐提醒：开" : "久坐提醒：关");
     lv_label_set_text(s_rem_lbl[1], g_set.remind_water ? "喝水提醒：开" : "喝水提醒：关");
     lv_obj_set_style_text_color(s_rem_lbl[0], lv_color_hex(g_set.remind_sit ? C_TEAL : C_DIM), 0);
     lv_obj_set_style_text_color(s_rem_lbl[1], lv_color_hex(g_set.remind_water ? C_TEAL : C_DIM), 0);
+    lv_label_set_text(s_rem_lbl[2], g_set.tap_buzz ? "按键振动：开" : "按键振动：关");
+    lv_obj_set_style_text_color(s_rem_lbl[2], lv_color_hex(g_set.tap_buzz ? C_TEAL : C_DIM), 0);
 }
 static void remind_cb(lv_event_t *e)
 {
-    if ((intptr_t)lv_event_get_user_data(e) == 0) g_set.remind_sit = !g_set.remind_sit;
-    else g_set.remind_water = !g_set.remind_water;
+    intptr_t k = (intptr_t)lv_event_get_user_data(e);
+    if (k == 0) g_set.remind_sit = !g_set.remind_sit;
+    else if (k == 1) g_set.remind_water = !g_set.remind_water;
+    else { g_set.tap_buzz = !g_set.tap_buzz; if (g_set.tap_buzz) hw_haptic(30); }
     remind_paint();
     store_save();
 }
@@ -388,9 +502,9 @@ void app_settings(lv_obj_t *root)
     set_row(root, 222, "SD 卡", store_sd_ok() ? "已插入" : "没有");
     set_row(root, 268, "训练", b2);
     s_rem_lbl[0] = NULL;
-    for (int i = 0; i < 2; i++) {
-        lv_obj_t *rb = ui_pill_btn(root, NULL, C_CARD, C_TEAL, 178, 56);
-        lv_obj_set_pos(rb, 22 + i * 188, 340);
+    for (int i = 0; i < 3; i++) {
+        lv_obj_t *rb = ui_pill_btn(root, NULL, C_CARD, C_TEAL, 116, 56);
+        lv_obj_set_pos(rb, 22 + i * 125, 340);
         s_rem_lbl[i] = ui_label(rb, &font_cn16, C_TEAL, "");
         lv_obj_center(s_rem_lbl[i]);
         lv_obj_add_event_cb(rb, remind_cb, LV_EVENT_CLICKED, (void *)(intptr_t)i);

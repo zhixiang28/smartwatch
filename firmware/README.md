@@ -1,4 +1,4 @@
-# FishWatch 养鱼手表 — firmware (v0.8.4)
+# FishWatch 养鱼手表 — firmware (v0.8.5)
 
 ESP-IDF firmware for the **Waveshare ESP32-S3-Touch-AMOLED-2.06** watch.
 The phone companion page is the `index.html` at the repo root (served by GitHub Pages).
