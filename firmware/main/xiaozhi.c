@@ -60,6 +60,12 @@ static EventGroupHandle_t s_ev;
 #define EV_HELLO     BIT1
 #define EV_CLOSED    BIT2
 static QueueHandle_t s_rxq;                   /* opus packets from the server (pkt_t *) */
+static QueueHandle_t s_txq;                   /* mic packets held while (re)connecting */
+static volatile bool s_listening;             /* "listen start" has been sent on this connection */
+static volatile bool s_want_listen;           /* the button is held */
+static volatile bool s_lost;                  /* server closed an idle connection: reconnect on the next press */
+static TaskHandle_t s_xl;                     /* 翻译 worker */
+static char s_xl_text[240];
 static TaskHandle_t s_ctl, s_mic, s_spk;
 typedef struct { uint16_t len; uint8_t d[]; } pkt_t;
 
@@ -207,6 +213,12 @@ static void on_json(const char *data, size_t len)
         const char *t = cJSON_GetStringValue(cJSON_GetObjectItem(j, "text"));
         if (t) set_txt(s_user, sizeof(s_user), t);
         if (s_st == XZ_LISTEN || s_st == XZ_READY) s_st = XZ_THINK;
+        if (s_mode == 1 && t && t[0] && s_xl) {          /* 翻译: we only want the transcript */
+            set_txt(s_xl_text, sizeof(s_xl_text), t);
+            xTaskNotifyGive(s_xl);
+        }
+    } else if (!strcmp(type, "tts") && s_mode == 1) {
+        /* 翻译 ignores 小智's own reply (the translator task aborts it) */
     } else if (!strcmp(type, "tts")) {
         const char *state = cJSON_GetStringValue(cJSON_GetObjectItem(j, "state"));
         if (state && !strcmp(state, "start")) { s_play = true; if (s_st != XZ_LISTEN) s_st = XZ_SPEAK; }
@@ -235,7 +247,7 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t id, void *data)
             if (s_txt && s_txt_len + d->data_len < 8192) { memcpy(s_txt + s_txt_len, d->data_ptr, d->data_len); s_txt_len += d->data_len; }
             if (s_txt && d->payload_offset + d->data_len >= d->payload_len) { on_json(s_txt, s_txt_len); s_txt_len = 0; }
         } else if (d->op_code == 0x2 && d->payload_offset == 0 && d->data_len == d->payload_len && d->data_len > 0) {
-            if (!s_play) break;                                                  /* aborted: drop */
+            if (!s_play || s_mode == 1) break;                                   /* aborted / translator: drop */
             pkt_t *p = heap_caps_malloc(sizeof(pkt_t) + d->data_len, MALLOC_CAP_SPIRAM);
             if (!p) break;
             p->len = d->data_len;
@@ -300,6 +312,23 @@ static void send_json(const char *fmt, const char *a)
 }
 
 /* ---------------- control task ---------------- */
+static void send_listen_start(void)
+{
+    send_json("{\"session_id\":\"%s\",\"type\":\"listen\",\"state\":\"start\",\"mode\":\"manual\"%s}", NULL);
+    /* audio recorded while connecting goes out first */
+    pkt_t *p;
+    for (int pass = 0; pass < 2; pass++) {             /* again after the flag: the mic may queue one meanwhile */
+        while (xQueueReceive(s_txq, &p, 0) == pdTRUE) {
+            if (s_ws) esp_websocket_client_send_bin(s_ws, (const char *)p->d, p->len, pdMS_TO_TICKS(500));
+            free(p);
+        }
+        s_listening = true;
+    }
+}
+
+/* The server closes a connection that sits idle, so it is only a convenience to keep one open:
+ * when it goes away we just wait for the next press and reconnect then, keeping what the user
+ * says meanwhile in s_txq. */
 static void ctl_task(void *arg)
 {
     for (;;) {
@@ -310,31 +339,51 @@ static void ctl_task(void *arg)
         net_wifi_use(true);
         if (!net_wait_connected(30000)) { fail("WiFi 连不上"); net_wifi_use(false); continue; }
         ensure_uuid();
-        bool ok = false;
-        for (int round = 0; round < 3 && s_want && !ok; round++) {
-            if (!g_set.xz_url[0] || round) {
-                s_st = XZ_CHECK;
-                int r = check_server();
-                if (r < 0) break;
-                if (r == 0) { if (!wait_activation()) { if (s_want) fail("激活等太久了，再打开试试"); break; } continue; }
+        while (s_want) {
+            bool ok = false;
+            for (int round = 0; round < 3 && s_want && !ok; round++) {
+                if (!g_set.xz_url[0] || round) {
+                    s_st = XZ_CHECK;
+                    int r = check_server();
+                    if (r < 0) break;
+                    if (r == 0) { if (!wait_activation()) { if (s_want) fail("激活等太久了，再打开试试"); break; } continue; }
+                }
+                s_st = XZ_CONNECT;
+                ok = ws_open();
             }
-            s_st = XZ_CONNECT;
-            ok = ws_open();
-        }
-        if (ok && s_mode == 1) {
-            /* translator: one instruction at the start of the session, the server keeps the context */
-            send_json("{\"session_id\":\"%s\",\"type\":\"listen\",\"state\":\"detect\",\"text\":\"%s\"}",
-                      "接下来你只做口译：我说中文，你就只说英文译文；我说英文，你就只说中文译文。不要解释，不要回答问题。现在回答：好的");
-        }
-        if (ok) s_st = XZ_READY;
-        /* stay connected while the app is open */
-        while (s_want && ok) {
-            EventBits_t b = xEventGroupWaitBits(s_ev, EV_CLOSED, pdTRUE, pdFALSE, pdMS_TO_TICKS(500));
-            if (b & EV_CLOSED) { ws_close(); if (s_want) fail("连线断了，再按一下重连"); break; }
+            if (!ok) break;                                   /* fail() already said why */
+            s_lost = false;
+            s_listening = false;
+            if (s_want_listen) { send_listen_start(); s_st = XZ_LISTEN; }
+            else if (!s_mic_on && s_listening == false && uxQueueMessagesWaiting(s_txq)) {
+                /* released before we got connected: send what was said, then stop */
+                send_listen_start();
+                send_json("{\"session_id\":\"%s\",\"type\":\"listen\",\"state\":\"stop\"%s}", NULL);
+                s_listening = false;
+                s_st = XZ_THINK;
+            } else s_st = XZ_READY;
+            while (s_want) {
+                EventBits_t b = xEventGroupWaitBits(s_ev, EV_CLOSED, pdTRUE, pdFALSE, pdMS_TO_TICKS(500));
+                if (b & EV_CLOSED) break;
+            }
+            ws_close();
+            s_play = false;
+            s_listening = false;
+            if (!s_want) break;
+            /* closed by the server: no error, reconnect on the next press */
+            s_lost = true;
+            if (s_st != XZ_LISTEN) s_st = XZ_READY;
+            ESP_LOGI(TAG, "connection closed; will reconnect on the next press");
+            while (s_want && !s_want_listen) ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(500));
+            if (!s_want) break;
+            s_st = XZ_LISTEN;                                 /* keep showing "listening" while we reconnect */
         }
         ws_close();
         s_play = false;
+        s_lost = false;
         net_wifi_use(false);
+        pkt_t *p;
+        while (s_txq && xQueueReceive(s_txq, &p, 0) == pdTRUE) free(p);
         if (!s_want && s_st != XZ_ERROR) s_st = XZ_OFF;
     }
 }
@@ -368,7 +417,14 @@ static void mic_task(void *arg)
                 phase += 0x18000;
                 if (n16 == 960) {
                     int len = opus_encode(enc, pcm16, 960, opus, 600);
-                    if (len > 0 && s_ws) esp_websocket_client_send_bin(s_ws, (const char *)opus, len, pdMS_TO_TICKS(500));
+                    if (len > 0) {
+                        if (s_listening && s_ws && esp_websocket_client_is_connected(s_ws))
+                            esp_websocket_client_send_bin(s_ws, (const char *)opus, len, pdMS_TO_TICKS(500));
+                        else {                               /* still connecting: hold it (up to ~6 s) */
+                            pkt_t *pk = heap_caps_malloc(sizeof(pkt_t) + len, MALLOC_CAP_SPIRAM);
+                            if (pk) { pk->len = len; memcpy(pk->d, opus, len); if (xQueueSend(s_txq, &pk, 0) != pdTRUE) free(pk); }
+                        }
+                    }
                     n16 = 0;
                 }
             }
@@ -409,15 +465,141 @@ static void spk_task(void *arg)
     }
 }
 
+/* ---------------- 翻译 ----------------
+ * The xiaozhi server doesn't take instructions (a "detect" text is treated as a wake word and
+ * gets a greeting), so 小智 is used only for speech recognition: on the transcript we abort its
+ * reply, translate with Google Translate (zh -> en, anything else -> zh-CN) and speak the result
+ * with Google's TTS (MP3, decoded by Helix like the radio). Both are the free, keyless endpoints
+ * the Translate web page uses. */
+#include "mp3dec.h"
+
+static void urlenc(const char *in, char *out, int n)
+{
+    static const char hex[] = "0123456789ABCDEF";
+    int o = 0;
+    for (const unsigned char *p = (const unsigned char *)in; *p && o < n - 4; p++) {
+        if ((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') || (*p >= '0' && *p <= '9') || strchr("-_.~", *p)) out[o++] = *p;
+        else { out[o++] = '%'; out[o++] = hex[*p >> 4]; out[o++] = hex[*p & 15]; }
+    }
+    out[o] = 0;
+}
+
+static int http_get(const char *url, uint8_t *out, int outlen)
+{
+    esp_http_client_config_t cfg = { .url = url, .timeout_ms = 10000, .crt_bundle_attach = esp_crt_bundle_attach,
+                                     .buffer_size = 4096, .buffer_size_tx = 2048 };
+    esp_http_client_handle_t c = esp_http_client_init(&cfg);
+    if (!c) return -1;
+    esp_http_client_set_header(c, "User-Agent", "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/120 Mobile Safari/537.36");
+    int len = -1;
+    if (esp_http_client_open(c, 0) == ESP_OK) {
+        esp_http_client_fetch_headers(c);
+        if (esp_http_client_get_status_code(c) == 200) {
+            len = 0;
+            int r;
+            while (len < outlen - 1 && (r = esp_http_client_read(c, (char *)out + len, outlen - 1 - len)) > 0) len += r;
+            out[len] = 0;
+        }
+    }
+    esp_http_client_close(c);
+    esp_http_client_cleanup(c);
+    return len;
+}
+
+static void play_mp3(const uint8_t *buf, int size)
+{
+    HMP3Decoder dec = MP3InitDecoder();
+    int16_t *pcm = heap_caps_malloc(2304 * 2, MALLOC_CAP_SPIRAM), *out = heap_caps_malloc(4096 * 2, MALLOC_CAP_SPIRAM);
+    if (dec && pcm && out) {
+        const unsigned char *p = buf;
+        size_t left = size;
+        uint32_t phase = 0;
+        int16_t last = 0;
+        while (left > 0 && s_play) {
+            int sync = MP3FindSyncWord(p, left);
+            if (sync < 0) break;
+            p += sync; left -= sync;
+            const unsigned char *before = p;
+            if (MP3Decode(dec, &p, &left, (short *)pcm, 0)) { if (p == before) { p++; left--; } continue; }
+            MP3FrameInfo fi;
+            MP3GetLastFrameInfo(dec, &fi);
+            if (fi.samprate <= 0 || fi.outputSamps <= 0) continue;
+            int n = fi.outputSamps / fi.nChans;
+            if (fi.nChans == 2) for (int i = 0; i < n; i++) pcm[i] = (pcm[2 * i] + pcm[2 * i + 1]) / 2;
+            uint32_t step = ((uint32_t)fi.samprate << 16) / 24000;
+            int o = 0;
+            while (o < 4096 && (phase >> 16) < (uint32_t)n) {
+                uint32_t idx = phase >> 16;
+                int16_t a = idx ? pcm[idx - 1] : last, b = pcm[idx];
+                out[o++] = (int16_t)(a + (((int32_t)(b - a) * (int32_t)(phase & 0xFFFF)) >> 16));
+                phase += step;
+            }
+            phase -= (uint32_t)n << 16;
+            last = pcm[n - 1];
+            sound_play_pcm(out, o, 24000, &s_play);
+        }
+    }
+    if (dec) MP3FreeDecoder(dec);
+    free(pcm);
+    free(out);
+}
+
+static bool has_cjk(const char *t)
+{
+    for (const unsigned char *p = (const unsigned char *)t; *p; p++) if (*p >= 0xE4 && *p <= 0xE9) return true;
+    return false;
+}
+
+static void xl_task(void *arg)
+{
+    char *q = heap_caps_malloc(1024, MALLOC_CAP_SPIRAM), *url = heap_caps_malloc(1400, MALLOC_CAP_SPIRAM);
+    uint8_t *buf = heap_caps_malloc(160 * 1024, MALLOC_CAP_SPIRAM);
+    char text[240], tr[480];
+    for (;;) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        if (!q || !url || !buf) continue;
+        send_json("{\"session_id\":\"%s\",\"type\":\"abort\"%s}", NULL);   /* stop 小智 answering */
+        taskENTER_CRITICAL(&s_txt_mux);
+        memcpy(text, s_xl_text, sizeof(text));
+        taskEXIT_CRITICAL(&s_txt_mux);
+        const char *tl = has_cjk(text) ? "en" : "zh-CN";
+        urlenc(text, q, 1024);
+        snprintf(url, 1400, "https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=%s&dt=t&q=%s", tl, q);
+        s_st = XZ_THINK;
+        int n = http_get(url, buf, 160 * 1024);
+        tr[0] = 0;
+        cJSON *j = n > 0 ? cJSON_Parse((char *)buf) : NULL;
+        cJSON *segs = j ? cJSON_GetArrayItem(j, 0) : NULL;            /* [[["translated","original",...],...],...] */
+        cJSON *seg;
+        cJSON_ArrayForEach(seg, segs) {
+            const char *part = cJSON_GetStringValue(cJSON_GetArrayItem(seg, 0));
+            if (part && strlen(tr) + strlen(part) < sizeof(tr) - 1) strcat(tr, part);
+        }
+        cJSON_Delete(j);
+        if (!tr[0]) { set_txt(s_bot, sizeof(s_bot), "翻译失败（连不上翻译服务）"); s_st = XZ_READY; continue; }
+        set_txt(s_bot, sizeof(s_bot), tr);
+        /* speak it: TTS takes up to ~200 characters per request */
+        char say[200];
+        snprintf(say, sizeof(say), "%s", tr);
+        urlenc(say, q, 1024);
+        snprintf(url, 1400, "https://translate.google.com/translate_tts?ie=UTF-8&client=tw-ob&tl=%s&q=%s", tl, q);
+        n = http_get(url, buf, 160 * 1024);
+        if (n > 0) { s_st = XZ_SPEAK; s_play = true; play_mp3(buf, n); s_play = false; }
+        if (s_st == XZ_SPEAK || s_st == XZ_THINK) s_st = XZ_READY;
+    }
+}
+
 static bool xz_tasks(void)
 {
     if (s_ctl) return true;
     s_ev = xEventGroupCreate();
     s_rxq = xQueueCreateWithCaps(40, sizeof(pkt_t *), MALLOC_CAP_SPIRAM);
-    if (!s_ev || !s_rxq) return false;
+    s_txq = xQueueCreateWithCaps(100, sizeof(pkt_t *), MALLOC_CAP_SPIRAM);
+    if (!s_ev || !s_rxq || !s_txq) return false;
     if (xTaskCreateWithCaps(ctl_task, "xz_ctl", 8192, NULL, 4, &s_ctl, MALLOC_CAP_SPIRAM) != pdPASS) return false;
     if (xTaskCreateWithCaps(mic_task, "xz_mic", 32768, NULL, 5, &s_mic, MALLOC_CAP_SPIRAM) != pdPASS) return false;
     if (xTaskCreateWithCaps(spk_task, "xz_spk", 16384, NULL, 5, &s_spk, MALLOC_CAP_SPIRAM) != pdPASS) return false;
+    if (xTaskCreateWithCaps(xl_task, "xz_tr", 12288, NULL, 4, &s_xl, MALLOC_CAP_SPIRAM) != pdPASS) return false;
     return true;
 }
 
@@ -435,6 +617,7 @@ static void xz_open(int mode)
 static void xz_shut(void)
 {
     s_want = false;
+    s_want_listen = false;
     s_mic_on = false;
     s_play = false;
 }
@@ -442,27 +625,60 @@ static void xz_shut(void)
 static void talk_down(void)
 {
     if (s_st == XZ_ERROR || s_st == XZ_OFF) { xz_open(s_mode); return; }   /* tap to retry */
-    if (s_st < XZ_READY) return;
-    if (s_st == XZ_SPEAK || s_st == XZ_THINK) {            /* interrupt 小智 */
+    if (s_st < XZ_READY && !s_lost) return;                                 /* still setting up */
+    if (s_st == XZ_SPEAK || s_st == XZ_THINK) {                             /* interrupt 小智 */
         s_play = false;
         send_json("{\"session_id\":\"%s\",\"type\":\"abort\"%s}", NULL);
     }
-    send_json("{\"session_id\":\"%s\",\"type\":\"listen\",\"state\":\"start\",\"mode\":\"manual\"%s}", NULL);
-    s_st = XZ_LISTEN;
+    s_want_listen = true;
     s_mic_on = true;
-    xTaskNotifyGive(s_mic);
+    xTaskNotifyGive(s_mic);                                                 /* record right away */
+    if (s_lost || !s_ws) xTaskNotifyGive(s_ctl);                            /* reconnect; audio is held meanwhile */
+    else send_listen_start();
+    s_st = XZ_LISTEN;
     hw_haptic(20);
 }
 
 static void talk_up(void)
 {
-    if (s_st != XZ_LISTEN) return;
+    if (!s_want_listen) return;
+    s_want_listen = false;
     s_mic_on = false;
-    send_json("{\"session_id\":\"%s\",\"type\":\"listen\",\"state\":\"stop\"%s}", NULL);
-    s_st = XZ_THINK;
+    if (s_listening) {
+        send_json("{\"session_id\":\"%s\",\"type\":\"listen\",\"state\":\"stop\"%s}", NULL);
+        s_listening = false;
+        s_st = XZ_THINK;
+    }
+    /* not connected yet: the control task sends the held audio + stop once it is */
 }
 
 /* ---------------- UI (shared by 小智 and 翻译) ---------------- */
+/* 小智's replies carry emoji; show only characters the font has (no boxes) */
+static void font_clean(char *s, const lv_font_t *f)
+{
+    char *w = s;
+    for (const char *r = s; *r;) {
+        const unsigned char *u = (const unsigned char *)r;
+        uint32_t i, cp;
+        if (u[0] < 0x80) { cp = u[0]; i = 1; }
+        else if ((u[0] & 0xE0) == 0xC0 && u[1]) { cp = (u[0] & 0x1F) << 6 | (u[1] & 0x3F); i = 2; }
+        else if ((u[0] & 0xF0) == 0xE0 && u[1] && u[2]) { cp = (u[0] & 0x0F) << 12 | (u[1] & 0x3F) << 6 | (u[2] & 0x3F); i = 3; }
+        else if ((u[0] & 0xF8) == 0xF0 && u[1] && u[2] && u[3]) { cp = (u[0] & 0x07) << 18 | (u[1] & 0x3F) << 12 | (u[2] & 0x3F) << 6 | (u[3] & 0x3F); i = 4; }
+        else { r++; continue; }                         /* broken byte: drop */
+        lv_font_glyph_dsc_t g;
+        bool keep = cp == '\n' || (cp >= 0x20 && cp != 0xFE0F && cp != 0x200D && lv_font_get_glyph_dsc(f, &g, cp, 0) && g.box_w);
+        if (cp == ' ') keep = true;
+        if (keep) { memmove(w, r, i); w += i; }
+        r += i;
+    }
+    *w = 0;
+    /* tidy leading punctuation left behind by a removed emoji, e.g. "~你好" */
+    for (;;) {
+        if (*s == '~' || *s == ' ') memmove(s, s + 1, strlen(s));
+        else if (!strncmp(s, "\xEF\xBD\x9E", 3)) memmove(s, s + 3, strlen(s) - 2);      /* fullwidth ～ */
+        else break;
+    }
+}
 static lv_obj_t *s_ui_st, *s_ui_user, *s_ui_bot, *s_ui_btn;
 static lv_timer_t *s_ui_tm;
 
@@ -481,6 +697,8 @@ static void ui_paint(lv_timer_t *t)
     memcpy(u, s_user, sizeof(u));
     memcpy(b, s_bot, sizeof(b));
     taskEXIT_CRITICAL(&s_txt_mux);
+    font_clean(u, &font_cn16);
+    font_clean(b, &font_cn20);
     lv_label_set_text(s_ui_user, u[0] ? u : "");
     lv_label_set_text(s_ui_bot, b);
     bool live = s_st == XZ_LISTEN;

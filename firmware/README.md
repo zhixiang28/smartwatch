@@ -1,4 +1,4 @@
-# FishWatch 养鱼手表 — firmware (v0.8.1)
+# FishWatch 养鱼手表 — firmware (v0.8.2)
 
 ESP-IDF firmware for the **Waveshare ESP32-S3-Touch-AMOLED-2.06** watch.
 The phone companion page is the `index.html` at the repo root (served by GitHub Pages).
@@ -63,7 +63,7 @@ activation code). Also standard HID (0x1812, consumer control, bonded) + battery
 services for the camera shutter.
 
 ## 0.8.0 apps
-- 小智 / 翻译 (`xiaozhi.c`): xiaozhi-esp32 protocol — OTA POST → activation code → `<ota>/activate`
+- 小智 / 翻译 (`xiaozhi.c`; 翻译 = 小智 speech recognition + Google Translate + Google TTS): xiaozhi-esp32 protocol — OTA POST → activation code → `<ota>/activate`
   polling → websocket (Opus 16 kHz up, server rate down), push-to-talk. Vendored `components/opus`,
   `components/esp_websocket_client`.
 - 音乐 (`app_media.c`): HTTP MP3 radio, Helix decoder (`components/helix_mp3`), resampled to 24 kHz.
