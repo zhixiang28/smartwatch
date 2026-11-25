@@ -473,8 +473,8 @@ $('btnWifi').onclick = async () => {
   let s = $('ssid').value.trim();
   if (!s) { $('ssid').focus(); return; }
   /* the watch (ESP32-S3) only has 2.4 GHz: a "..._5GHz" / "...-5G" network is invisible to it */
-  if (/(^|[\s_\-.])5\s*g(hz)?\b/i.test(s)) {
-    const alt = s.replace(/[\s_\-.]*5\s*g(hz)?\b/i, '').trim();
+  if (/(^|[\s_\-.])5\s*g(hz)?(?![a-z0-9])/i.test(s)) {
+    const alt = s.replace(/[\s_\-.]*5\s*g(hz)?(?![a-z0-9])/i, '').trim();
     const msg = `「${s}」看起来是 5 GHz 的 WiFi，手表只能连 2.4 GHz，连不上。\n` +
       (alt ? `同一台路由器通常还有一个 2.4 GHz 的名字，例如「${alt}」，密码一般一样。\n\n按「确定」改成加入「${alt}」；按「取消」照原样加入。`
            : '请改用路由器的 2.4 GHz 名字。\n\n按「确定」照原样加入；按「取消」不加。');
