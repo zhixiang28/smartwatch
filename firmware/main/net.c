@@ -78,6 +78,9 @@ static volatile bool s_radio_on;
  * s_radio_lock serialises switching the radio on/off against the idle-off timer. */
 static portMUX_TYPE s_users_mux = portMUX_INITIALIZER_UNLOCKED;
 static SemaphoreHandle_t s_radio_lock;
+/* set while the watch itself drops the link (idle-off, WiFi disabled, network deleted),
+ * so that disconnect is not reported as an error */
+static volatile bool s_leaving;
 static int users_add(int d)
 {
     taskENTER_CRITICAL(&s_users_mux);
@@ -161,7 +164,7 @@ void net_wifi_del(const char *ssid)
         memmove(&s_nets[i], &s_nets[i + 1], sizeof(net_t) * (s_nnets - i - 1));
         s_nnets--;
         nets_save();
-        if (s_wifi_up && !strcmp(g_set.ssid, ssid)) esp_wifi_disconnect();
+        if (s_wifi_up && !strcmp(g_set.ssid, ssid)) { s_leaving = true; esp_wifi_disconnect(); }
         return;
     }
 }
@@ -191,7 +194,9 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         int r = d ? d->reason : 0;
         if (r == 15 || r == 204 || r == 202 || r == 2) snprintf(s_err, sizeof(s_err), "%s 密码可能不对", g_set.ssid);
         else if (r == 201) snprintf(s_err, sizeof(s_err), "找不到 %s", g_set.ssid);
-        else if (r != 8) snprintf(s_err, sizeof(s_err), "%s 断开（原因 %d）", g_set.ssid, r);
+        /* 8 ASSOC_LEAVE / 36 STA_LEAVING: we left on purpose (the radio idles off 20 s after
+         * the last job). Not an error: keep "记住 N 个 · 平时关着" on the phone-settings screen. */
+        else if (!s_leaving && r != 8 && r != 36) snprintf(s_err, sizeof(s_err), "%s 断开（原因 %d）", g_set.ssid, r);
         ESP_LOGW(TAG, "wifi disconnected, reason %d", r);
         bool was = s_wifi_up;
         s_wifi_up = false;
@@ -216,6 +221,7 @@ static bool join(int k, int rssi, int timeout_ms)
     memset(g_set.ssid, 0, sizeof(g_set.ssid));
     strncpy(g_set.ssid, s_nets[k].ssid, sizeof(g_set.ssid) - 1);
     xEventGroupClearBits(s_ev, EV_GOT_IP | EV_DISC);
+    s_leaving = false;                          /* from here on a drop is real */
     ESP_LOGI(TAG, "joining %s (%d dBm)", g_set.ssid, rssi);
     esp_wifi_connect();
     EventBits_t b = xEventGroupWaitBits(s_ev, EV_GOT_IP | EV_DISC, pdTRUE, pdFALSE, pdMS_TO_TICKS(timeout_ms));
@@ -261,6 +267,7 @@ static void radio_off_cb(void *arg)
     bool off = false;
     radio_lock();
     if (s_users == 0 && s_radio_on) {          /* re-checked under the lock: a job may have just started */
+        s_leaving = true;
         esp_wifi_disconnect();
         esp_wifi_stop();
         s_radio_on = false;
@@ -342,7 +349,7 @@ void net_wifi_enable(bool on)
     s_wifi_enabled = on;
     if (!on) {
         radio_lock();
-        if (s_radio_on) { esp_wifi_disconnect(); esp_wifi_stop(); s_radio_on = false; s_wifi_up = false; }
+        if (s_radio_on) { s_leaving = true; esp_wifi_disconnect(); esp_wifi_stop(); s_radio_on = false; s_wifi_up = false; }
         radio_unlock();
     } else if (s_users > 0) radio_up();
 }
