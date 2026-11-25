@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#000000">
-<title>Smart Watch · 设定</title>
+<title>Smart Watch</title>
 <meta name="application-name" content="Smart Watch">
 <meta name="apple-mobile-web-app-title" content="Smart Watch">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -14,209 +14,364 @@
 <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
 <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
 <style>
-  :root{--bg:#000;--card:#1c1c1e;--line:#2c2c2e;--text:#fff;--dim:#8e8e93;--blue:#0a84ff;--green:#30d158;--orange:#ff9f0a;--red:#ff453a;--teal:#5eead4}
+  :root{--bg:#000;--card:#1c1c1e;--card2:#2c2c2e;--line:#38383a;--text:#fff;--dim:#8e8e93;--blue:#0a84ff;--green:#30d158;--orange:#ff9f0a;--coral:#ff8a5b;--teal:#5eead4;--red:#ff453a}
   *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
-  body{margin:0;background:var(--bg);color:var(--text);font:16px/1.45 system-ui,-apple-system,"Noto Sans SC","PingFang SC",sans-serif}
-  .wrap{max-width:520px;margin:0 auto;padding:28px 16px 60px}
-  h1{font-size:30px;margin:6px 4px 16px}
-  .grp{background:var(--card);border-radius:14px;overflow:hidden}
-  .it{display:flex;align-items:center;gap:12px;min-height:48px;padding:0 16px;border-bottom:1px solid var(--line)}
+  body{margin:0;background:var(--bg);color:var(--text);font:16px/1.45 system-ui,-apple-system,"Noto Sans SC","PingFang SC",sans-serif;padding-bottom:84px}
+  .wrap{max-width:540px;margin:0 auto;padding:22px 16px 20px}
+  h1{font-size:32px;margin:4px 4px 2px;letter-spacing:-.5px}
+  .sub{color:var(--dim);font-size:14px;margin:0 4px 16px}
+  .card{background:var(--card);border-radius:18px;padding:16px;margin-bottom:12px}
+  .card h3{margin:0 0 10px;font-size:15px;color:var(--dim);font-weight:600;display:flex;justify-content:space-between;align-items:baseline}
+  .card h3 b{color:var(--text);font-weight:600}
+  .big{font-size:40px;font-weight:700;letter-spacing:-1px;line-height:1.05}
+  .unit{font-size:15px;color:var(--dim);font-weight:500;margin-left:4px}
+  .row{display:flex;gap:12px;align-items:center}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+  .stat{background:var(--card);border-radius:18px;padding:14px 16px}
+  .stat .k{font-size:13px;color:var(--dim)} .stat .v{font-size:24px;font-weight:700;margin-top:2px}
+  .it{display:flex;align-items:center;gap:12px;min-height:48px;padding:0 2px;border-bottom:1px solid var(--line)}
   .it:last-child{border-bottom:0}
-  .it .k{flex:1}
-  .it .v{color:var(--dim);font-size:14px;text-align:right}
-  .hd{font-size:13px;color:var(--dim);margin:22px 16px 6px;letter-spacing:.3px}
-  .note{font-size:13px;color:var(--dim);margin:8px 16px 0}
-  button{border:0;border-radius:24px;font:600 15px inherit;font-family:inherit;padding:0 18px;height:44px;cursor:pointer}
-  .pri{background:var(--blue);color:#fff}
-  .sec{background:#2c2c2e;color:var(--blue)}
+  .it .k{flex:1} .it .v{color:var(--dim);font-size:14px;text-align:right}
+  .hd{font-size:13px;color:var(--dim);margin:20px 6px 8px;letter-spacing:.3px}
+  .note{font-size:13px;color:var(--dim);margin:8px 6px 0}
+  button{border:0;border-radius:22px;font:600 15px system-ui,"Noto Sans SC",sans-serif;padding:0 18px;height:44px;cursor:pointer}
+  .pri{background:var(--blue);color:#fff} .sec{background:var(--card2);color:var(--blue)} .del{background:none;color:var(--red);height:36px;padding:0 6px}
   button:disabled{opacity:.4}
-  input{background:transparent;border:0;color:#fff;font:16px inherit;font-family:inherit;flex:1;min-width:0;outline:none;text-align:right}
-  .watch{display:flex;align-items:center;gap:14px;padding:14px 16px}
+  input{background:transparent;border:0;color:#fff;font:16px system-ui,"Noto Sans SC",sans-serif;flex:1;min-width:0;outline:none;text-align:right}
+  .watch{display:flex;align-items:center;gap:14px}
   .face{width:46px;height:56px;border-radius:14px;background:linear-gradient(180deg,#0b3a48,#03131a);border:2px solid #3a3a3c;flex:none;position:relative;overflow:hidden}
   .face i{position:absolute;left:12px;top:30px;width:18px;height:10px;border-radius:50%;background:#ff8a4c}
-  .code{display:flex;gap:10px;justify-content:center;padding:14px}
-  .code input{width:220px;flex:none;text-align:center;font-size:30px;letter-spacing:12px;background:#2c2c2e;border-radius:12px;height:56px}
-  .bar{height:6px;border-radius:3px;background:#2c2c2e;overflow:hidden;width:120px}
-  .bar b{display:block;height:100%}
-  #find{display:none;position:fixed;inset:0;background:rgba(0,0,0,.92);z-index:9;align-items:center;justify-content:center;flex-direction:column;gap:20px;text-align:center}
+  .code input{width:100%;text-align:center;font-size:30px;letter-spacing:14px;background:var(--card2);border-radius:14px;height:58px}
+  .bar{height:8px;border-radius:4px;background:var(--card2);overflow:hidden;flex:1}
+  .bar b{display:block;height:100%;border-radius:4px}
+  .tabs{position:fixed;left:0;right:0;bottom:0;background:rgba(20,20,22,.94);backdrop-filter:blur(12px);border-top:1px solid #222;display:flex;justify-content:center;padding:6px 0 calc(10px + env(safe-area-inset-bottom));z-index:5}
+  .tabs button{background:none;color:var(--dim);flex:1;max-width:160px;height:52px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;font-size:12px;font-weight:500}
+  .tabs button.on{color:var(--teal)}
+  .tabs svg{width:24px;height:24px}
+  .page{display:none} .page.on{display:block}
+  .chip{display:inline-block;font-size:12px;padding:3px 9px;border-radius:999px;background:var(--card2);color:var(--dim)}
+  .chip.ok{color:var(--green)} .chip.warn{color:var(--orange)}
+  .sess{padding:12px 0;border-bottom:1px solid var(--line)} .sess:last-child{border-bottom:0}
+  .sess .t{display:flex;justify-content:space-between;font-weight:600} .sess .d{color:var(--dim);font-size:13px;margin-top:2px}
+  .empty{color:var(--dim);font-size:14px;text-align:center;padding:18px 0}
+  #find{display:none;position:fixed;inset:0;background:rgba(0,0,0,.94);z-index:9;align-items:center;justify-content:center;flex-direction:column;gap:20px;text-align:center}
   #find.on{display:flex}
-  #find .big{font-size:26px;font-weight:700}
-  #unsup{display:none;background:#2c1515;border-radius:14px;padding:14px 16px;margin-bottom:14px;font-size:14px}
-  .ok{color:var(--green)} .warn{color:var(--orange)}
-  #log{font:12px/1.4 ui-monospace,monospace;color:#6b7280;white-space:pre-wrap;margin:16px 4px 0;max-height:120px;overflow:auto}
+  #unsup{display:none;background:#2c1515;border-radius:14px;padding:14px 16px;margin-bottom:12px;font-size:14px}
+  #log{font:12px/1.4 ui-monospace,monospace;color:#555;white-space:pre-wrap;margin:14px 6px 0;max-height:110px;overflow:auto}
+  svg text{font-family:system-ui,"Noto Sans SC",sans-serif}
 </style>
 </head>
 <body>
 <div class="wrap">
-  <h1>手表设定</h1>
-  <div id="installBox" class="grp" style="display:none;margin-bottom:14px">
-    <div class="it"><span class="k">把 Smart Watch 安装到手机桌面</span><button id="btnInstall" class="pri">下载</button></div>
-  </div>
-  <p id="iosTip" class="note" style="display:none;margin:0 4px 14px">iPhone：点 Safari 的「分享」→「添加到主屏幕」即可安装。</p>
-  <div id="unsup">这个浏览器不支持网页蓝牙。请用 <b>Android 手机的 Chrome</b> 打开（网址需要是 https，例如 GitHub Pages）。</div>
+  <div id="unsup">这个浏览器不支持网页蓝牙。请用 <b>Android 手机的 Chrome</b> 打开（网址需要 https，例如 GitHub Pages）。</div>
 
-  <div class="grp watch">
+  <div id="installBox" class="card" style="display:none;padding:4px 16px">
+    <div class="it"><span class="k">把 Smart Watch 安装到手机桌面</span><button id="btnInstall" class="pri" style="height:36px">下载</button></div>
+  </div>
+  <p id="iosTip" class="note" style="display:none;margin:0 6px 12px">iPhone：点 Safari 的「分享」→「添加到主屏幕」即可安装。</p>
+
+  <!-- connection card (always visible) -->
+  <div class="card watch">
     <div class="face"><i></i></div>
     <div style="flex:1">
       <div style="font-weight:600">Smart Watch</div>
-      <div id="st" style="font-size:13px;color:var(--dim)">未连接</div>
+      <div id="st" style="font-size:13px;color:var(--dim)">未连接 · 数据是上次同步的</div>
     </div>
-    <button id="btnConn" class="pri">连接手表</button>
+    <button id="btnConn" class="pri">连接</button>
+  </div>
+  <div id="pairBox" class="card" style="display:none">
+    <h3>配对码<span style="font-weight:400">手表：手机设定 → 开启蓝牙配对</span></h3>
+    <div class="code"><input id="code" inputmode="numeric" maxlength="4" placeholder="····" aria-label="配对码"></div>
+    <div style="display:flex;justify-content:center;margin-top:12px"><button id="btnPair" class="pri">配对</button></div>
   </div>
 
-  <p class="note" style="margin:10px 4px 0">先在手表：应用 → 手机设定 → 开启蓝牙配对。蓝牙 3 分钟没连上会自动关闭。</p>
-  <div id="pairBox" style="display:none">
-    <div class="hd">配对码（手表 → 应用 → 手机设定）</div>
-    <div class="grp">
-      <div class="code"><input id="code" inputmode="numeric" maxlength="4" placeholder="····" aria-label="配对码"></div>
-      <div style="display:flex;justify-content:center;padding:0 0 14px"><button id="btnPair" class="pri">配对</button></div>
+  <!-- ============ HEALTH ============ -->
+  <section class="page on" id="p-health">
+    <h1>健康</h1>
+    <p class="sub" id="syncInfo">还没有同步过</p>
+    <div class="card">
+      <h3>今天的步数<span id="goalTxt"></span></h3>
+      <div class="row">
+        <svg id="ring" width="112" height="112" viewBox="0 0 112 112" role="img" aria-label="步数目标进度"></svg>
+        <div><div class="big" id="today">0<span class="unit">步</span></div><div class="note" style="margin:6px 0 0" id="todayExtra"></div></div>
+      </div>
     </div>
-  </div>
+    <div class="card"><h3>今天每小时<b id="peakTxt"></b></h3><svg id="hourChart" width="100%" height="120" role="img" aria-label="今天每小时步数"></svg></div>
+    <div class="card"><h3>最近 7 天<b id="avgTxt"></b></h3><svg id="weekChart" width="100%" height="150" role="img" aria-label="最近 7 天步数"></svg></div>
+    <div class="grid2">
+      <div class="stat"><div class="k">30 天平均</div><div class="v" id="avg30">--</div></div>
+      <div class="stat"><div class="k">最多的一天</div><div class="v" id="best30">--</div></div>
+      <div class="stat"><div class="k">连续达标</div><div class="v" id="streak">--</div></div>
+      <div class="stat"><div class="k">30 天总距离</div><div class="v" id="dist30">--</div></div>
+    </div>
+    <div class="card" style="margin-top:12px">
+      <h3>小鱼</h3>
+      <div class="it"><span class="k">饥饿</span><div class="bar"><b id="fHunger" style="background:var(--orange);width:0"></b></div></div>
+      <div class="it"><span class="k">水的脏度</span><div class="bar"><b id="fDirt" style="background:#9acd32;width:0"></b></div></div>
+    </div>
+  </section>
 
-  <div id="main" style="display:none">
+  <!-- ============ TRAINING ============ -->
+  <section class="page" id="p-train">
+    <h1>训练</h1>
+    <p class="sub" id="trainSub">举杠铃记录</p>
+    <div class="grid2">
+      <div class="stat"><div class="k">本周训练量</div><div class="v" id="wkVol">--</div></div>
+      <div class="stat"><div class="k">本周次数</div><div class="v" id="wkSess">--</div></div>
+    </div>
+    <div class="card" style="margin-top:12px"><h3>每周训练量 (kg)</h3><svg id="volChart" width="100%" height="150" role="img" aria-label="每周训练量"></svg></div>
+    <div class="card"><h3>最高纪录</h3><div id="prList"></div></div>
+    <div class="card"><h3>最近的训练</h3><div id="sessList"></div></div>
+  </section>
+
+  <!-- ============ SETTINGS ============ -->
+  <section class="page" id="p-set">
+    <h1>设定</h1>
+    <p class="sub">需要先连接手表</p>
     <div class="hd">手表状态</div>
-    <div class="grp">
+    <div class="card" style="padding:4px 16px">
       <div class="it"><span class="k">电量</span><span class="v" id="sBatt">--</span></div>
       <div class="it"><span class="k">WiFi</span><span class="v" id="sWifi">--</span></div>
       <div class="it"><span class="k">时间</span><span class="v" id="sTime">--</span></div>
-      <div class="it"><span class="k">鱼的饥饿</span><span class="bar"><b id="sHunger" style="background:var(--orange);width:0"></b></span></div>
-      <div class="it"><span class="k">水的脏度</span><span class="bar"><b id="sDirt" style="background:#9acd32;width:0"></b></span></div>
-      <div class="it"><span class="k">训练</span><span class="v" id="sWork">--</span></div>
     </div>
-
-    <div class="hd">WIFI（手表用来联网、自动对时）</div>
-    <div class="grp">
+    <div class="hd">记住的 WIFI（自动连最强的那个）</div>
+    <div class="card" style="padding:4px 16px" id="netList"><div class="empty">连接手表后显示</div></div>
+    <div class="card" style="padding:4px 16px">
       <div class="it"><label for="ssid" class="k">名称</label><input id="ssid" placeholder="WiFi 名称" autocomplete="off"></div>
       <div class="it"><label for="pass" class="k">密码</label><input id="pass" type="password" placeholder="没有就留空"></div>
-      <div class="it" style="justify-content:flex-end"><button id="btnWifi" class="sec">发送到手表</button></div>
+      <div class="it" style="justify-content:flex-end"><button id="btnWifi" class="sec">加入手表</button></div>
     </div>
-    <p class="note">只支持 2.4 GHz WiFi。</p>
-
-    <div class="hd">时间</div>
-    <div class="grp">
-      <div class="it"><span class="k">手机时间</span><span class="v" id="phoneTime">--</span></div>
-      <div class="it" style="justify-content:flex-end"><button id="btnTime" class="sec">立即对时</button></div>
-    </div>
-    <p class="note">每次连上都会自动对时，时区跟手机一样。</p>
-
+    <p class="note">最多记住 6 个，只支持 2.4 GHz。</p>
     <div class="hd">其他</div>
-    <div class="grp">
-      <div class="it"><span class="k">让手表振动一下</span><button id="btnBuzz" class="sec">振动</button></div>
+    <div class="card" style="padding:4px 16px">
+      <div class="it"><label for="goal" class="k">每日步数目标</label><input id="goal" inputmode="numeric" value="8000" style="max-width:90px"><button id="btnGoal" class="sec" style="height:36px">设定</button></div>
+      <div class="it"><span class="k">立即对时</span><button id="btnTime" class="sec" style="height:36px">对时</button></div>
+      <div class="it"><span class="k">让手表振动一下</span><button id="btnBuzz" class="sec" style="height:36px">振动</button></div>
+      <div class="it"><span class="k">清除手机上的数据</span><button id="btnClear" class="del">清除</button></div>
     </div>
-  </div>
-  <div id="log"></div>
+    <div id="log"></div>
+  </section>
 </div>
 
-<div id="find">
-  <div class="big">手表在找手机</div>
-  <div style="color:var(--dim)">手机正在响</div>
-  <button id="btnFound" class="pri" style="width:200px">找到了</button>
-</div>
+<nav class="tabs">
+  <button class="on" data-p="p-health"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 4c2 0 3 2 3 5s-1 5-3 5-3-2-3-5 1-5 3-5M16 10c2 0 3 2 3 5s-1 5-3 5-3-2-3-5 1-5 3-5"/></svg>健康</button>
+  <button data-p="p-train"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M2 9v6M5 7v10M19 7v10M22 9v6M5 12h14"/></svg>训练</button>
+  <button data-p="p-set"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M5 19l2-2M17 7l2-2"/></svg>设定</button>
+</nav>
+
+<div id="find"><div style="font-size:26px;font-weight:700">手表在找手机</div><div style="color:var(--dim)">手机正在响</div><button id="btnFound" class="pri" style="width:200px">找到了</button></div>
 
 <script>
 const U = n => `f15a000${n}-6c2b-4b9a-9d3e-2a1c5e7b8d00`;
-const SVC = U(1), AUTH = U(2), TIME = U(3), WIFI = U(4), STATUS = U(5), CMD = U(6), LOC = U(7);
+const UU = { AUTH: U(2), TIME: U(3), WIFI: U(4), STATUS: U(5), CMD: U(6), LOC: U(7), DATA: U(8) };
+const SVC = U(1);
 const $ = id => document.getElementById(id);
 const enc = new TextEncoder(), dec = new TextDecoder();
-let dev, ch = {}, authed = false, audio;
-
-const log = m => { $('log').textContent = (new Date().toLocaleTimeString() + ' ' + m + '\n' + $('log').textContent).slice(0, 2000); };
+let dev, ch = {}, audio, findTimer, rx = '';
+const log = m => { $('log').textContent = (new Date().toLocaleTimeString() + ' ' + m + '\n' + $('log').textContent).slice(0, 3000); };
 if (!navigator.bluetooth) { $('unsup').style.display = 'block'; $('btnConn').disabled = true; }
 
-setInterval(() => $('phoneTime').textContent = new Date().toLocaleString('zh-CN', { hour12: false }), 1000);
+/* ---------- tabs ---------- */
+document.querySelectorAll('.tabs button').forEach(b => b.onclick = () => {
+  document.querySelectorAll('.tabs button').forEach(x => x.classList.toggle('on', x === b));
+  document.querySelectorAll('.page').forEach(p => p.classList.toggle('on', p.id === b.dataset.p));
+  scrollTo(0, 0);
+});
 
-function setState(t, cls) { $('st').textContent = t; $('st').className = cls || ''; }
+/* ---------- local data store (history accumulates on the phone) ---------- */
+const DB_KEY = 'fw_db';
+let db = JSON.parse(localStorage.getItem(DB_KEY) || '{"days":{},"sets":{},"pr":{},"hour":null,"info":null,"last":0}');
+const saveDb = () => localStorage.setItem(DB_KEY, JSON.stringify(db));
 
-async function write(c, text) { await ch[c].writeValueWithResponse(enc.encode(text)); }
+const dayStr = d => { const t = new Date(d * 86400000); return `${t.getUTCMonth() + 1}/${t.getUTCDate()}`; };
+const wd = d => '日一二三四五六'[new Date(d * 86400000).getUTCDay()];
+const fmt = n => n >= 10000 ? (n / 1000).toFixed(1) + 'k' : String(Math.round(n));
+
+/* ---------- charts (plain SVG, works offline) ---------- */
+function bars(svg, vals, labels, color, goal) {
+  const W = svg.clientWidth || 340, H = +svg.getAttribute('height'), pad = 22, n = vals.length;
+  const max = Math.max(1, goal || 0, ...vals) * 1.1, bw = (W - 8) / n;
+  let s = '';
+  if (goal) { const gy = H - pad - (goal / max) * (H - pad - 8); s += `<line x1="0" x2="${W}" y1="${gy}" y2="${gy}" stroke="#555" stroke-dasharray="4 4"/><text x="${W - 2}" y="${gy - 4}" fill="#777" font-size="10" text-anchor="end">目标</text>`; }
+  vals.forEach((v, i) => {
+    const h = Math.max(v > 0 ? 3 : 0, (v / max) * (H - pad - 8)), x = 4 + i * bw + bw * 0.18, w = bw * 0.64;
+    const c = typeof color === 'function' ? color(v, i) : color;
+    s += `<rect x="${x}" y="${H - pad - h}" width="${w}" height="${h}" rx="${Math.min(4, w / 2)}" fill="${c}"/>`;
+    if (labels[i]) s += `<text x="${x + w / 2}" y="${H - 6}" fill="#8e8e93" font-size="10" text-anchor="middle">${labels[i]}</text>`;
+  });
+  svg.innerHTML = s;
+}
+function ring(svg, frac) {
+  const r = 46, c = 2 * Math.PI * r, f = Math.min(1, frac);
+  svg.innerHTML = `<circle cx="56" cy="56" r="${r}" stroke="#163826" stroke-width="12" fill="none"/>
+    <circle cx="56" cy="56" r="${r}" stroke="${frac >= 1 ? '#5eead4' : '#30d158'}" stroke-width="12" fill="none" stroke-linecap="round"
+      stroke-dasharray="${c * f} ${c}" transform="rotate(-90 56 56)"/>
+    <text x="56" y="62" fill="#fff" font-size="18" font-weight="700" text-anchor="middle">${Math.round(frac * 100)}%</text>`;
+}
+
+/* ---------- render ---------- */
+function render() {
+  const info = db.info || {}, goal = info.goal || 8000;
+  const today = info.today || Math.floor((Date.now() - new Date().getTimezoneOffset() * 60000) / 86400000);
+  const hour = db.hour && db.hour.day === today ? db.hour.h : new Array(24).fill(0);
+  const todaySteps = hour.reduce((a, b) => a + b, 0);
+  $('syncInfo').textContent = db.last ? '上次同步 ' + new Date(db.last).toLocaleString('zh-CN', { hour12: false }) : '还没有同步过 · 连接手表后自动同步';
+  $('today').innerHTML = todaySteps.toLocaleString() + '<span class="unit">步</span>';
+  $('goalTxt').textContent = '目标 ' + goal.toLocaleString();
+  $('todayExtra').textContent = `约 ${(todaySteps * 0.7 / 1000).toFixed(2)} 公里 · ${Math.round(todaySteps * 0.04)} 千卡`;
+  ring($('ring'), todaySteps / goal);
+  const peak = hour.indexOf(Math.max(...hour));
+  $('peakTxt').textContent = todaySteps ? `最活跃 ${peak}:00` : '';
+  bars($('hourChart'), hour, hour.map((_, i) => i % 6 === 0 ? i + '时' : ''), (v, i) => i === peak && v ? '#5eead4' : '#30d158');
+
+  const days = []; for (let d = today - 6; d <= today; d++) days.push(d === today ? todaySteps : (db.days[d] || 0));
+  bars($('weekChart'), days, days.map((_, i) => i === 6 ? '今天' : wd(today - 6 + i)), v => v >= goal ? '#5eead4' : '#30d158', goal);
+  const past = Object.entries(db.days).filter(([d]) => +d > today - 31 && +d < today).map(([, v]) => v);
+  const all30 = [...past, todaySteps];
+  $('avgTxt').textContent = '平均 ' + fmt(days.reduce((a, b) => a + b, 0) / 7);
+  $('avg30').textContent = all30.length ? fmt(all30.reduce((a, b) => a + b, 0) / all30.length) : '--';
+  $('best30').textContent = all30.length ? fmt(Math.max(...all30)) : '--';
+  let st = 0; for (let d = today - 1; (db.days[d] || 0) >= goal; d--) st++; if (todaySteps >= goal) st++;
+  $('streak').textContent = st + ' 天';
+  $('dist30').textContent = (all30.reduce((a, b) => a + b, 0) * 0.7 / 1000).toFixed(1) + ' km';
+  $('fHunger').style.width = (info.hunger || 0) + '%';
+  $('fDirt').style.width = (info.dirt || 0) + '%';
+
+  /* training */
+  const sets = Object.values(db.sets).filter(s => s.ts > 0).sort((a, b) => b.ts - a.ts);
+  const weekStart = d => { const t = new Date(d); t.setHours(0, 0, 0, 0); t.setDate(t.getDate() - ((t.getDay() + 6) % 7)); return t.getTime(); };
+  const thisWeek = weekStart(Date.now());
+  const wkSets = sets.filter(s => s.ts * 1000 >= thisWeek);
+  $('wkVol').textContent = fmt(wkSets.reduce((a, s) => a + s.kg * s.reps, 0)) + ' kg';
+  $('wkSess').textContent = new Set(wkSets.map(s => new Date(s.ts * 1000).toDateString())).size + ' 次';
+  const vols = [], lbl = [];
+  for (let w = 7; w >= 0; w--) {
+    const a = thisWeek - w * 7 * 86400000, b = a + 7 * 86400000;
+    vols.push(sets.filter(s => s.ts * 1000 >= a && s.ts * 1000 < b).reduce((x, s) => x + s.kg * s.reps, 0));
+    const t = new Date(a); lbl.push(w === 0 ? '本周' : `${t.getMonth() + 1}/${t.getDate()}`);
+  }
+  bars($('volChart'), vols, lbl, (v, i) => i === 7 ? '#ff8a5b' : '#7a4a35');
+  $('trainSub').textContent = sets.length ? `共 ${sets.length} 组记录` : '在手表上用"训练"记录后，连接同步就会出现';
+  const prs = Object.entries(db.pr).filter(([, kg]) => kg > 0);
+  $('prList').innerHTML = prs.length ? prs.map(([l, kg]) => `<div class="it"><span class="k">${l}</span><span style="font-weight:700">${kg} kg</span></div>`).join('') : '<div class="empty">还没有纪录</div>';
+  const byDay = {};
+  sets.forEach(s => { const k = new Date(s.ts * 1000).toDateString(); (byDay[k] = byDay[k] || []).push(s); });
+  const sess = Object.entries(byDay).slice(0, 12).map(([k, list]) => {
+    const lifts = {}; list.forEach(s => { const L = lifts[s.lift] = lifts[s.lift] || { sets: 0, reps: 0, vol: 0, best: 0 }; L.sets++; L.reps += s.reps; L.vol += s.kg * s.reps; L.best = Math.max(L.best, s.kg); });
+    const d = new Date(k), vol = list.reduce((a, s) => a + s.kg * s.reps, 0);
+    return `<div class="sess"><div class="t"><span>${d.getMonth() + 1}月${d.getDate()}日 周${'日一二三四五六'[d.getDay()]}</span><span>${fmt(vol)} kg</span></div>` +
+      Object.entries(lifts).map(([l, L]) => `<div class="d">${l} · ${L.sets} 组 ${L.reps} 次 · 最重 ${L.best} kg</div>`).join('') + '</div>';
+  });
+  $('sessList').innerHTML = sess.length ? sess.join('') : '<div class="empty">还没有训练记录</div>';
+}
+render();
+addEventListener('resize', render);
+
+/* ---------- Bluetooth ---------- */
+function setState(t, cls) { $('st').textContent = t; $('st').style.color = cls === 'ok' ? 'var(--green)' : cls === 'warn' ? 'var(--orange)' : 'var(--dim)'; }
+async function write(c, text) { if (!ch[c]) throw new Error('手表固件太旧'); await ch[c].writeValueWithResponse(enc.encode(text)); }
 
 $('btnConn').onclick = async () => {
-  if (dev && dev.gatt.connected) { dev.gatt.disconnect(); return; }
   try { audio = audio || new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {}
+  if (dev && dev.gatt.connected) { dev.gatt.disconnect(); return; }
   try {
     dev = await navigator.bluetooth.requestDevice({ filters: [{ namePrefix: 'FishWatch' }], optionalServices: [SVC] });
     dev.addEventListener('gattserverdisconnected', onDisc);
     setState('正在连接…');
     const srv = await (await dev.gatt.connect()).getPrimaryService(SVC);
-    for (const [k, u] of Object.entries({ AUTH, TIME, WIFI, STATUS, CMD, LOC })) { try { ch[k] = await srv.getCharacteristic(u); } catch (e) {} }
-    setState('已连接 · 请输入配对码', 'warn');
+    ch = {};
+    for (const [k, u] of Object.entries(UU)) { try { ch[k] = await srv.getCharacteristic(u); } catch (e) {} }
     $('btnConn').textContent = '断开';
-    $('pairBox').style.display = 'block';
     const saved = localStorage.getItem('fw_code');
-    if (saved) { $('code').value = saved; pair(); } else $('code').focus();
+    if (saved) { $('code').value = saved; pair(); } else { $('pairBox').style.display = 'block'; setState('请输入手表上的配对码', 'warn'); $('code').focus(); }
   } catch (e) { log('连接失败：' + e.message); setState('未连接'); }
 };
-
-function onDisc() {
-  authed = false;
-  setState('已断开');
-  $('btnConn').textContent = '连接手表';
-  $('pairBox').style.display = 'none';
-  $('main').style.display = 'none';
-}
+function onDisc() { setState('已断开 · 数据是上次同步的'); $('btnConn').textContent = '连接'; $('pairBox').style.display = 'none'; }
 
 async function pair() {
   try {
     await write('AUTH', $('code').value.trim());
-    authed = true;
     localStorage.setItem('fw_code', $('code').value.trim());
     $('pairBox').style.display = 'none';
-    $('main').style.display = 'block';
-    setState('已配对', 'ok');
+    setState('已连接', 'ok');
     await ch.STATUS.startNotifications();
     ch.STATUS.addEventListener('characteristicvaluechanged', e => showStatus(dec.decode(e.target.value)));
     await ch.CMD.startNotifications();
-    ch.CMD.addEventListener('characteristicvaluechanged', e => onCmd(dec.decode(e.target.value)));
+    ch.CMD.addEventListener('characteristicvaluechanged', e => { const m = dec.decode(e.target.value); if (m === 'find') startRing(); else if (m === 'find_stop') stopRing(); });
     await syncTime();
     sendLocation();
     showStatus(dec.decode(await ch.STATUS.readValue()));
+    await syncData();
   } catch (e) {
     localStorage.removeItem('fw_code');
-    setState('配对码不对，再看一下手表', 'warn');
+    $('pairBox').style.display = 'block';
+    setState('配对码不对，或手表蓝牙没开', 'warn');
     log('配对失败：' + e.message);
   }
 }
 $('btnPair').onclick = pair;
-$('code').addEventListener('keyup', e => { if (e.key === 'Enter' || $('code').value.length === 4) pair(); });
+$('code').addEventListener('input', () => { if ($('code').value.length === 4) pair(); });
 
-async function syncTime() {
-  const epoch = Math.floor(Date.now() / 1000), tz = -new Date().getTimezoneOffset();
-  await write('TIME', `${epoch},${tz}`);
-  log('已对时');
+/* health sync: the watch streams JSON lines, ending with END */
+async function syncData() {
+  if (!ch.DATA) { log('手表固件不支持同步'); return; }
+  rx = '';
+  setState('同步数据中…', 'ok');
+  await ch.DATA.startNotifications();
+  ch.DATA.oncharacteristicvaluechanged = e => {
+    rx += dec.decode(e.target.value);
+    let i;
+    while ((i = rx.indexOf('\n')) >= 0) {
+      const line = rx.slice(0, i); rx = rx.slice(i + 1);
+      if (line === 'END') { db.last = Date.now(); saveDb(); render(); setState('已连接 · 已同步', 'ok'); log('同步完成'); continue; }
+      try {
+        const o = JSON.parse(line);
+        if (o.t === 'info') db.info = o;
+        else if (o.t === 'hour') db.hour = o;
+        else if (o.t === 'day') db.days[o.day] = o.steps;
+        else if (o.t === 'set' && o.ts) db.sets[o.ts + '_' + o.lift] = o;
+        else if (o.t === 'pr') db.pr[o.lift] = o.kg;
+      } catch (e) { log('坏数据：' + line.slice(0, 40)); }
+    }
+  };
+  await write('CMD', 'sync');
 }
+
+async function syncTime() { await write('TIME', `${Math.floor(Date.now() / 1000)},${-new Date().getTimezoneOffset()}`); log('已对时'); }
 function sendLocation() {
   if (!ch.LOC || !navigator.geolocation) return;
-  navigator.geolocation.getCurrentPosition(p => {
-    write('LOC', `${p.coords.latitude.toFixed(3)},${p.coords.longitude.toFixed(3)}`).then(() => log('已同步位置（天气用）')).catch(() => {});
-  }, () => log('没有位置权限，天气默认新加坡'), { timeout: 8000 });
+  navigator.geolocation.getCurrentPosition(p => write('LOC', `${p.coords.latitude.toFixed(3)},${p.coords.longitude.toFixed(3)}`).then(() => log('已同步位置（天气用）')).catch(() => {}),
+    () => log('没有位置权限，天气默认新加坡'), { timeout: 8000 });
 }
-$('btnTime').onclick = () => syncTime().catch(e => log(e.message));
-
-$('btnWifi').onclick = async () => {
-  const s = $('ssid').value.trim();
-  if (!s) { $('ssid').focus(); return; }
-  try { await write('WIFI', s + '\n' + $('pass').value); log('WiFi 已发送，手表正在连接'); $('pass').value = ''; }
-  catch (e) { log('发送失败：' + e.message); }
-};
-
-$('btnBuzz').onclick = () => write('CMD', 'buzz').catch(e => log(e.message));
 
 function showStatus(txt) {
   let s; try { s = JSON.parse(txt); } catch { return; }
   $('sBatt').textContent = s.batt >= 0 ? `${s.batt}%${s.chg ? ' · 充电中' : ''}` : '--';
-  $('sWifi').innerHTML = s.wifi ? `<span class="ok">${s.ssid}</span>` : (s.ssid ? `<span class="warn">连接中 ${s.ssid}</span>` : '未设定');
-  $('sTime').innerHTML = s.time ? '<span class="ok">已对时</span>' : '<span class="warn">未对时</span>';
-  $('sHunger').style.width = s.hunger + '%';
-  $('sDirt').style.width = s.dirt + '%';
-  $('sWork').textContent = `${s.workouts} 次 · 累计 ${s.total} kg`;
-  if (s.ssid && !$('ssid').value) $('ssid').value = s.ssid;
+  $('sWifi').innerHTML = s.wifi ? `<span class="chip ok">${s.ssid}</span>` : (s.nets && s.nets.length ? '<span class="chip warn">找网络中</span>' : '未设定');
+  $('sTime').innerHTML = s.time ? '<span class="chip ok">已对时</span>' : '<span class="chip warn">未对时</span>';
+  if (s.nets) {
+    $('netList').innerHTML = s.nets.length ? s.nets.map(n => `<div class="it"><span class="k">${n}${s.wifi && s.ssid === n ? ' <span class="chip ok">已连接</span>' : ''}</span><button class="del" data-n="${encodeURIComponent(n)}">删除</button></div>`).join('') : '<div class="empty">还没有记住任何 WiFi</div>';
+    $('netList').querySelectorAll('.del').forEach(b => b.onclick = () => write('CMD', 'wifi_del:' + decodeURIComponent(b.dataset.n)).then(() => log('已删除')).catch(e => log(e.message)));
+  }
+  if (db.info) { db.info.hunger = s.hunger; db.info.dirt = s.dirt; render(); }
 }
 
+$('btnWifi').onclick = async () => {
+  const s = $('ssid').value.trim();
+  if (!s) { $('ssid').focus(); return; }
+  try { await write('WIFI', s + '\n' + $('pass').value); log('已加入，手表会自动连接'); $('ssid').value = ''; $('pass').value = ''; } catch (e) { log('失败：' + e.message); }
+};
+$('btnGoal').onclick = () => { const g = parseInt($('goal').value); if (g >= 1000) write('CMD', 'goal:' + g).then(() => { if (db.info) db.info.goal = g; saveDb(); render(); log('目标已设定'); }).catch(e => log(e.message)); };
+$('btnTime').onclick = () => syncTime().catch(e => log(e.message));
+$('btnBuzz').onclick = () => write('CMD', 'buzz').catch(e => log(e.message));
+$('btnClear').onclick = () => { if (confirm('清除手机上保存的健康和训练数据？手表上的数据不受影响。')) { localStorage.removeItem(DB_KEY); location.reload(); } };
+
 /* install as app (PWA) */
-if ('serviceWorker' in navigator) window.addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(e => log('离线缓存失败：' + e.message)));
+if ('serviceWorker' in navigator) addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(e => log('离线缓存失败：' + e.message)));
 let installEvt;
 const standalone = matchMedia('(display-mode: standalone)').matches || navigator.standalone;
-window.addEventListener('beforeinstallprompt', e => { e.preventDefault(); installEvt = e; $('installBox').style.display = 'block'; });
-window.addEventListener('appinstalled', () => { $('installBox').style.display = 'none'; log('已安装到桌面'); });
+addEventListener('beforeinstallprompt', e => { e.preventDefault(); installEvt = e; $('installBox').style.display = 'block'; });
+addEventListener('appinstalled', () => { $('installBox').style.display = 'none'; log('已安装到桌面'); });
 $('btnInstall').onclick = async () => {
   if (!installEvt) return;
   installEvt.prompt();
@@ -227,25 +382,18 @@ $('btnInstall').onclick = async () => {
 if (!standalone && /iphone|ipad|ipod/i.test(navigator.userAgent)) $('iosTip').style.display = 'block';
 
 /* find my phone */
-let findTimer;
-function onCmd(m) {
-  if (m === 'find') startRing(); else if (m === 'find_stop') stopRing();
-}
 function startRing() {
   $('find').classList.add('on');
-  try {
-    audio = audio || new (window.AudioContext || window.webkitAudioContext)();
-    const beep = () => {
+  const beep = () => {
+    try {
       const o = audio.createOscillator(), g = audio.createGain();
       o.frequency.value = 1320; o.connect(g); g.connect(audio.destination);
-      g.gain.setValueAtTime(0.0001, audio.currentTime);
-      g.gain.exponentialRampToValueAtTime(0.6, audio.currentTime + 0.02);
-      g.gain.exponentialRampToValueAtTime(0.0001, audio.currentTime + 0.35);
-      o.start(); o.stop(audio.currentTime + 0.4);
-      if (navigator.vibrate) navigator.vibrate(300);
-    };
-    beep(); clearInterval(findTimer); findTimer = setInterval(beep, 700);
-  } catch (e) { log(e.message); }
+      g.gain.setValueAtTime(0.0001, audio.currentTime); g.gain.exponentialRampToValueAtTime(0.6, audio.currentTime + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, audio.currentTime + 0.35); o.start(); o.stop(audio.currentTime + 0.4);
+    } catch (e) {}
+    if (navigator.vibrate) navigator.vibrate(300);
+  };
+  beep(); clearInterval(findTimer); findTimer = setInterval(beep, 700);
 }
 function stopRing() { clearInterval(findTimer); $('find').classList.remove('on'); }
 $('btnFound').onclick = () => { stopRing(); write('CMD', 'find_stop').catch(() => {}); };
