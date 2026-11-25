@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#000000">
+<title>鱼缸手表 · 设定</title>
+<style>
+  :root{--bg:#000;--card:#1c1c1e;--line:#2c2c2e;--text:#fff;--dim:#8e8e93;--blue:#0a84ff;--green:#30d158;--orange:#ff9f0a;--red:#ff453a;--teal:#5eead4}
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  body{margin:0;background:var(--bg);color:var(--text);font:16px/1.45 system-ui,-apple-system,"Noto Sans SC","PingFang SC",sans-serif}
+  .wrap{max-width:520px;margin:0 auto;padding:28px 16px 60px}
+  h1{font-size:30px;margin:6px 4px 16px}
+  .grp{background:var(--card);border-radius:14px;overflow:hidden}
+  .it{display:flex;align-items:center;gap:12px;min-height:48px;padding:0 16px;border-bottom:1px solid var(--line)}
+  .it:last-child{border-bottom:0}
+  .it .k{flex:1}
+  .it .v{color:var(--dim);font-size:14px;text-align:right}
+  .hd{font-size:13px;color:var(--dim);margin:22px 16px 6px;letter-spacing:.3px}
+  .note{font-size:13px;color:var(--dim);margin:8px 16px 0}
+  button{border:0;border-radius:24px;font:600 15px inherit;font-family:inherit;padding:0 18px;height:44px;cursor:pointer}
+  .pri{background:var(--blue);color:#fff}
+  .sec{background:#2c2c2e;color:var(--blue)}
+  button:disabled{opacity:.4}
+  input{background:transparent;border:0;color:#fff;font:16px inherit;font-family:inherit;flex:1;min-width:0;outline:none;text-align:right}
+  .watch{display:flex;align-items:center;gap:14px;padding:14px 16px}
+  .face{width:46px;height:56px;border-radius:14px;background:linear-gradient(180deg,#0b3a48,#03131a);border:2px solid #3a3a3c;flex:none;position:relative;overflow:hidden}
+  .face i{position:absolute;left:12px;top:30px;width:18px;height:10px;border-radius:50%;background:#ff8a4c}
+  .code{display:flex;gap:10px;justify-content:center;padding:14px}
+  .code input{width:220px;flex:none;text-align:center;font-size:30px;letter-spacing:12px;background:#2c2c2e;border-radius:12px;height:56px}
+  .bar{height:6px;border-radius:3px;background:#2c2c2e;overflow:hidden;width:120px}
+  .bar b{display:block;height:100%}
+  #find{display:none;position:fixed;inset:0;background:rgba(0,0,0,.92);z-index:9;align-items:center;justify-content:center;flex-direction:column;gap:20px;text-align:center}
+  #find.on{display:flex}
+  #find .big{font-size:26px;font-weight:700}
+  #unsup{display:none;background:#2c1515;border-radius:14px;padding:14px 16px;margin-bottom:14px;font-size:14px}
+  .ok{color:var(--green)} .warn{color:var(--orange)}
+  #log{font:12px/1.4 ui-monospace,monospace;color:#6b7280;white-space:pre-wrap;margin:16px 4px 0;max-height:120px;overflow:auto}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>手表设定</h1>
+  <div id="unsup">这个浏览器不支持网页蓝牙。请用 <b>Android 手机的 Chrome</b> 打开（网址需要是 https，例如 GitHub Pages）。</div>
+
+  <div class="grp watch">
+    <div class="face"><i></i></div>
+    <div style="flex:1">
+      <div style="font-weight:600">鱼缸手表</div>
+      <div id="st" style="font-size:13px;color:var(--dim)">未连接</div>
+    </div>
+    <button id="btnConn" class="pri">连接手表</button>
+  </div>
+
+  <div id="pairBox" style="display:none">
+    <div class="hd">配对码（手表 → 应用 → 手机设定）</div>
+    <div class="grp">
+      <div class="code"><input id="code" inputmode="numeric" maxlength="4" placeholder="····" aria-label="配对码"></div>
+      <div style="display:flex;justify-content:center;padding:0 0 14px"><button id="btnPair" class="pri">配对</button></div>
+    </div>
+  </div>
+
+  <div id="main" style="display:none">
+    <div class="hd">手表状态</div>
+    <div class="grp">
+      <div class="it"><span class="k">电量</span><span class="v" id="sBatt">--</span></div>
+      <div class="it"><span class="k">WiFi</span><span class="v" id="sWifi">--</span></div>
+      <div class="it"><span class="k">时间</span><span class="v" id="sTime">--</span></div>
+      <div class="it"><span class="k">鱼的饥饿</span><span class="bar"><b id="sHunger" style="background:var(--orange);width:0"></b></span></div>
+      <div class="it"><span class="k">水的脏度</span><span class="bar"><b id="sDirt" style="background:#9acd32;width:0"></b></span></div>
+      <div class="it"><span class="k">训练</span><span class="v" id="sWork">--</span></div>
+    </div>
+
+    <div class="hd">WIFI（手表用来联网、自动对时）</div>
+    <div class="grp">
+      <div class="it"><label for="ssid" class="k">名称</label><input id="ssid" placeholder="WiFi 名称" autocomplete="off"></div>
+      <div class="it"><label for="pass" class="k">密码</label><input id="pass" type="password" placeholder="没有就留空"></div>
+      <div class="it" style="justify-content:flex-end"><button id="btnWifi" class="sec">发送到手表</button></div>
+    </div>
+    <p class="note">只支持 2.4 GHz WiFi。</p>
+
+    <div class="hd">时间</div>
+    <div class="grp">
+      <div class="it"><span class="k">手机时间</span><span class="v" id="phoneTime">--</span></div>
+      <div class="it" style="justify-content:flex-end"><button id="btnTime" class="sec">立即对时</button></div>
+    </div>
+    <p class="note">每次连上都会自动对时，时区跟手机一样。</p>
+
+    <div class="hd">其他</div>
+    <div class="grp">
+      <div class="it"><span class="k">让手表振动一下</span><button id="btnBuzz" class="sec">振动</button></div>
+    </div>
+  </div>
+  <div id="log"></div>
+</div>
+
+<div id="find">
+  <div class="big">手表在找手机</div>
+  <div style="color:var(--dim)">手机正在响</div>
+  <button id="btnFound" class="pri" style="width:200px">找到了</button>
+</div>
+
+<script>
+const U = n => `f15a000${n}-6c2b-4b9a-9d3e-2a1c5e7b8d00`;
+const SVC = U(1), AUTH = U(2), TIME = U(3), WIFI = U(4), STATUS = U(5), CMD = U(6);
+const $ = id => document.getElementById(id);
+const enc = new TextEncoder(), dec = new TextDecoder();
+let dev, ch = {}, authed = false, audio;
+
+const log = m => { $('log').textContent = (new Date().toLocaleTimeString() + ' ' + m + '\n' + $('log').textContent).slice(0, 2000); };
+if (!navigator.bluetooth) { $('unsup').style.display = 'block'; $('btnConn').disabled = true; }
+
+setInterval(() => $('phoneTime').textContent = new Date().toLocaleString('zh-CN', { hour12: false }), 1000);
+
+function setState(t, cls) { $('st').textContent = t; $('st').className = cls || ''; }
+
+async function write(c, text) { await ch[c].writeValueWithResponse(enc.encode(text)); }
+
+$('btnConn').onclick = async () => {
+  if (dev && dev.gatt.connected) { dev.gatt.disconnect(); return; }
+  try { audio = audio || new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {}
+  try {
+    dev = await navigator.bluetooth.requestDevice({ filters: [{ namePrefix: 'FishWatch' }], optionalServices: [SVC] });
+    dev.addEventListener('gattserverdisconnected', onDisc);
+    setState('正在连接…');
+    const srv = await (await dev.gatt.connect()).getPrimaryService(SVC);
+    for (const [k, u] of Object.entries({ AUTH, TIME, WIFI, STATUS, CMD })) ch[k] = await srv.getCharacteristic(u);
+    setState('已连接 · 请输入配对码', 'warn');
+    $('btnConn').textContent = '断开';
+    $('pairBox').style.display = 'block';
+    const saved = localStorage.getItem('fw_code');
+    if (saved) { $('code').value = saved; pair(); } else $('code').focus();
+  } catch (e) { log('连接失败：' + e.message); setState('未连接'); }
+};
+
+function onDisc() {
+  authed = false;
+  setState('已断开');
+  $('btnConn').textContent = '连接手表';
+  $('pairBox').style.display = 'none';
+  $('main').style.display = 'none';
+}
+
+async function pair() {
+  try {
+    await write('AUTH', $('code').value.trim());
+    authed = true;
+    localStorage.setItem('fw_code', $('code').value.trim());
+    $('pairBox').style.display = 'none';
+    $('main').style.display = 'block';
+    setState('已配对', 'ok');
+    await ch.STATUS.startNotifications();
+    ch.STATUS.addEventListener('characteristicvaluechanged', e => showStatus(dec.decode(e.target.value)));
+    await ch.CMD.startNotifications();
+    ch.CMD.addEventListener('characteristicvaluechanged', e => onCmd(dec.decode(e.target.value)));
+    await syncTime();
+    showStatus(dec.decode(await ch.STATUS.readValue()));
+  } catch (e) {
+    localStorage.removeItem('fw_code');
+    setState('配对码不对，再看一下手表', 'warn');
+    log('配对失败：' + e.message);
+  }
+}
+$('btnPair').onclick = pair;
+$('code').addEventListener('keyup', e => { if (e.key === 'Enter' || $('code').value.length === 4) pair(); });
+
+async function syncTime() {
+  const epoch = Math.floor(Date.now() / 1000), tz = -new Date().getTimezoneOffset();
+  await write('TIME', `${epoch},${tz}`);
+  log('已对时');
+}
+$('btnTime').onclick = () => syncTime().catch(e => log(e.message));
+
+$('btnWifi').onclick = async () => {
+  const s = $('ssid').value.trim();
+  if (!s) { $('ssid').focus(); return; }
+  try { await write('WIFI', s + '\n' + $('pass').value); log('WiFi 已发送，手表正在连接'); $('pass').value = ''; }
+  catch (e) { log('发送失败：' + e.message); }
+};
+
+$('btnBuzz').onclick = () => write('CMD', 'buzz').catch(e => log(e.message));
+
+function showStatus(txt) {
+  let s; try { s = JSON.parse(txt); } catch { return; }
+  $('sBatt').textContent = s.batt >= 0 ? `${s.batt}%${s.chg ? ' · 充电中' : ''}` : '--';
+  $('sWifi').innerHTML = s.wifi ? `<span class="ok">${s.ssid}</span>` : (s.ssid ? `<span class="warn">连接中 ${s.ssid}</span>` : '未设定');
+  $('sTime').innerHTML = s.time ? '<span class="ok">已对时</span>' : '<span class="warn">未对时</span>';
+  $('sHunger').style.width = s.hunger + '%';
+  $('sDirt').style.width = s.dirt + '%';
+  $('sWork').textContent = `${s.workouts} 次 · 累计 ${s.total} kg`;
+  if (s.ssid && !$('ssid').value) $('ssid').value = s.ssid;
+}
+
+/* find my phone */
+let findTimer;
+function onCmd(m) {
+  if (m === 'find') startRing(); else if (m === 'find_stop') stopRing();
+}
+function startRing() {
+  $('find').classList.add('on');
+  try {
+    audio = audio || new (window.AudioContext || window.webkitAudioContext)();
+    const beep = () => {
+      const o = audio.createOscillator(), g = audio.createGain();
+      o.frequency.value = 1320; o.connect(g); g.connect(audio.destination);
+      g.gain.setValueAtTime(0.0001, audio.currentTime);
+      g.gain.exponentialRampToValueAtTime(0.6, audio.currentTime + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, audio.currentTime + 0.35);
+      o.start(); o.stop(audio.currentTime + 0.4);
+      if (navigator.vibrate) navigator.vibrate(300);
+    };
+    beep(); clearInterval(findTimer); findTimer = setInterval(beep, 700);
+  } catch (e) { log(e.message); }
+}
+function stopRing() { clearInterval(findTimer); $('find').classList.remove('on'); }
+$('btnFound').onclick = () => { stopRing(); write('CMD', 'find_stop').catch(() => {}); };
+</script>
+</body>
+</html>
