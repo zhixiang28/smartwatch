@@ -7,7 +7,7 @@ extern void (*g_app_close)(void);
 static const char *LIFTS[5] = {"深蹲", "卧推", "硬拉", "推举", "划船"};
 static const float DEF_KG[5] = {60, 40, 80, 30, 40};
 
-static lv_obj_t *s_root, *s_kg, *s_reps, *s_clock, *s_arc, *s_mode;
+static lv_obj_t *s_root, *s_kg, *s_reps, *s_clock, *s_arc, *s_mode, *s_kg_unit;
 static lv_timer_t *s_tm;
 static int s_lift, s_set, s_total_reps, s_rest_left, s_rest_total;
 static float s_weight, s_volume, s_best_kg;
@@ -102,6 +102,8 @@ static void kg_cb(lv_event_t *e)
     s_weight += d * 2.5f;
     if (s_weight < 0) s_weight = 0;
     lv_label_set_text(s_kg, kg_str(s_weight));
+    /* the number re-centres itself (lv_obj_align); move "kg" to follow its new right edge */
+    if (s_kg_unit) { lv_obj_update_layout(s_kg); lv_obj_align_to(s_kg_unit, s_kg, LV_ALIGN_OUT_RIGHT_BOTTOM, 6, -8); }
 }
 
 static void tap_rep(lv_event_t *e) { s_manual++; hw_haptic(15); sound_play(SND_REP); refresh_lift(NULL); }
@@ -142,8 +144,8 @@ static void build_lift(void)
     s_kg = ui_label(row, &font_num, C_TEXT, "");
     lv_label_set_text(s_kg, kg_str(s_weight));
     lv_obj_align(s_kg, LV_ALIGN_CENTER, -14, 0);
-    lv_obj_t *u = ui_label(row, &font_cn16, C_DIM, "kg");
-    lv_obj_align_to(u, s_kg, LV_ALIGN_OUT_RIGHT_BOTTOM, 6, -8);
+    s_kg_unit = ui_label(row, &font_cn16, C_DIM, "kg");
+    lv_obj_align_to(s_kg_unit, s_kg, LV_ALIGN_OUT_RIGHT_BOTTOM, 6, -8);
 
     lv_obj_t *big = lv_button_create(s_root);
     lv_obj_set_size(big, 366, 190);
@@ -200,6 +202,8 @@ static void build_rest(void)
     lv_obj_set_style_arc_color(s_arc, lv_color_hex(0x12302F), LV_PART_MAIN);
     lv_obj_set_style_arc_color(s_arc, lv_color_hex(C_TEAL), LV_PART_INDICATOR);
     s_clock = ui_label(s_root, &font_num, C_TEXT, "1:30");
+    lv_obj_set_width(s_clock, 230);                 /* fixed width, centred text: stays put as it counts down */
+    lv_obj_set_style_text_align(s_clock, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_align_to(s_clock, s_arc, LV_ALIGN_CENTER, 0, -10);
     lv_obj_t *nx = ui_label(s_root, &font_cn16, 0x8FD8CC, "");
     lv_label_set_text_fmt(nx, "下一组 %s kg", kg_str(s_weight));

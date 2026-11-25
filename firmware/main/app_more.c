@@ -14,6 +14,16 @@
 extern void (*g_app_refresh)(void);
 extern void (*g_app_close)(void);
 
+/* lv_obj_align_to() is a one-time placement: a label centred while its text is still short
+ * (or empty) grows to the right when the text changes. Give it the arc's full width and
+ * centre the text inside, so it stays centred whatever the text becomes. */
+static void center_on_arc(lv_obj_t *lbl, lv_obj_t *arc, int arc_size, int dy)
+{
+    lv_obj_set_width(lbl, arc_size);
+    lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align_to(lbl, arc, LV_ALIGN_CENTER, 0, dy);
+}
+
 static lv_obj_t *arc_create(lv_obj_t *root, int size, int y, uint32_t bg, uint32_t fg)
 {
     lv_obj_t *a = lv_arc_create(root);
@@ -49,9 +59,9 @@ void app_steps(lv_obj_t *root)
     ui_header(root, "计步", 0x16A34A);
     s_st_arc = arc_create(root, 250, 84, 0x10301C, 0x30D158);
     s_st_num = ui_label(root, &font_num, C_TEXT, "0");
-    lv_obj_align_to(s_st_num, s_st_arc, LV_ALIGN_CENTER, 0, -8);
+    center_on_arc(s_st_num, s_st_arc, 250, -8);
     lv_obj_t *u = ui_label(root, &font_cn16, 0x86EFAC, "步");
-    lv_obj_align_to(u, s_st_arc, LV_ALIGN_CENTER, 0, 42);
+    center_on_arc(u, s_st_arc, 250, 42);
     s_st_sub = ui_label(root, &font_cn16, 0xA1A1AA, "");
     lv_obj_align(s_st_sub, LV_ALIGN_TOP_MID, 0, 356);
     lv_obj_t *n = ui_label(root, &font_cn16, 0x6B7280, hw_imu_ok() ? "戴在手上走路就会计步" : "没有检测到动作感应器");
@@ -124,9 +134,9 @@ void app_focus(lv_obj_t *root)
     if (!s_fc_run && s_fc_left_us <= 0) s_fc_left_us = (int64_t)s_fc_min * 60 * 1000000;
     s_fc_arc = arc_create(root, 250, 80, 0x2A1A12, 0xFF8A5B);
     s_fc_lbl = ui_label(root, &font_num, C_TEXT, "");
-    lv_obj_align_to(s_fc_lbl, s_fc_arc, LV_ALIGN_CENTER, 0, -6);
+    center_on_arc(s_fc_lbl, s_fc_arc, 250, -6);
     lv_obj_t *t = ui_label(root, &font_cn16, 0xFFB38A, "专心做事，鱼陪你");
-    lv_obj_align_to(t, s_fc_arc, LV_ALIGN_CENTER, 0, 44);
+    center_on_arc(t, s_fc_arc, 250, 44);
     lv_obj_t *lb = ui_pill_btn(root, NULL, C_CARD, 0xFFB38A, 170, 66);
     lv_obj_set_pos(lb, 22, 400);
     s_fc_len = ui_label(lb, &font_cn20, 0xFFB38A, "");
