@@ -131,6 +131,10 @@ void net_wifi_add(const char *ssid, const char *pass);
 void net_wifi_del(const char *ssid);
 int net_wifi_list_json(char *buf, int len);
 int json_esc(char *out, int len, const char *in);
+typedef void (*net_test_cb_t)(bool ok, const char *ssid, const char *why);
+/* Try a network; the callback (on the WiFi task) says whether it connected. It is only
+ * saved if it did. Returns false if another test is still running. */
+bool net_wifi_test(const char *ssid, const char *pass, net_test_cb_t cb);
 int net_wifi_count(void);
 
 /* ---------- bluetooth settings service (ble.c) ---------- */

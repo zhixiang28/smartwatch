@@ -18,6 +18,7 @@ static bool s_wifi_started;
 static bool s_wifi_enabled = true;
 static volatile bool s_ntp_done;
 static char s_err[64];
+static volatile int s_last_reason;      /* reason of the latest STA disconnect */
 const char *net_last_error(void) { return s_err; }
 
 void net_apply_tz(void)
@@ -81,6 +82,11 @@ static SemaphoreHandle_t s_radio_lock;
 /* set while the watch itself drops the link (idle-off, WiFi disabled, network deleted),
  * so that disconnect is not reported as an error */
 static volatile bool s_leaving;
+
+/* A network sent from the phone is first tried, and only saved if it really connects. */
+static volatile bool s_test_pending;
+static net_t s_test;
+static net_test_cb_t s_test_cb;
 static int users_add(int d)
 {
     taskENTER_CRITICAL(&s_users_mux);
@@ -192,6 +198,7 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
         wifi_event_sta_disconnected_t *d = data;
         int r = d ? d->reason : 0;
+        s_last_reason = r;
         if (r == 15 || r == 204 || r == 202 || r == 2) snprintf(s_err, sizeof(s_err), "%s 密码可能不对", g_set.ssid);
         else if (r == 201) snprintf(s_err, sizeof(s_err), "找不到 %s", g_set.ssid);
         /* 8 ASSOC_LEAVE / 36 STA_LEAVING: we left on purpose (the radio idles off 20 s after
@@ -307,10 +314,17 @@ bool net_wait_connected(int ms)
     return (b & EV_GOT_IP) != 0;
 }
 
+static void run_test(void);
+
 static void mgr_task(void *arg)
 {
     int fails = 0;
     for (;;) {
+        if (s_test_pending && s_radio_on) {
+            run_test();
+            fails = 0;
+            continue;
+        }
         if (s_radio_on && s_wifi_enabled && !s_wifi_up && s_nnets && s_users > 0) {
             if (try_join()) fails = 0;
             else if (++fails >= 3) { fails = 0; ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(30000)); continue; }
@@ -318,6 +332,85 @@ static void mgr_task(void *arg)
         }
         ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(5000));
     }
+}
+
+static void test_done(bool ok, const char *why)
+{
+    net_test_cb_t cb = s_test_cb;
+    char ssid[33];
+    memcpy(ssid, s_test.ssid, sizeof(ssid));
+    s_test_pending = false;
+    if (ok) net_wifi_add(s_test.ssid, s_test.pass);   /* saves, and starts a time sync on the live link */
+    memset(&s_test, 0, sizeof(s_test));
+    ESP_LOGI(TAG, "test '%s': %s", ssid, ok ? "ok" : why);
+    if (cb) cb(ok, ssid, why);
+    net_wifi_use(false);                                /* the reference taken in net_wifi_test() */
+    net_wifi_reconnect();
+    notify_ui();
+}
+
+/* Runs on the WiFi manager task. */
+static void run_test(void)
+{
+    char prev_ssid[sizeof(g_set.ssid)];
+    memcpy(prev_ssid, g_set.ssid, sizeof(prev_ssid));
+    if (s_wifi_up) {                                    /* drop the current link first */
+        s_leaving = true;
+        xEventGroupClearBits(s_ev, EV_DISC);
+        esp_wifi_disconnect();
+        xEventGroupWaitBits(s_ev, EV_DISC, pdTRUE, pdFALSE, pdMS_TO_TICKS(3000));
+        s_wifi_up = false;
+    }
+    wifi_scan_config_t sc = { .show_hidden = true };
+    uint16_t n = 20;
+    wifi_ap_record_t *ap = calloc(n, sizeof(wifi_ap_record_t));
+    bool found = false, hidden = false;
+    if (ap && esp_wifi_scan_start(&sc, true) == ESP_OK) {
+        esp_wifi_scan_get_ap_records(&n, ap);
+        for (int i = 0; i < n; i++) {
+            if (!ap[i].ssid[0]) hidden = true;
+            if (!strcmp((char *)ap[i].ssid, s_test.ssid)) found = true;
+        }
+    } else n = 0;
+    free(ap);
+    if (!found && !hidden) { memcpy(g_set.ssid, prev_ssid, sizeof(prev_ssid)); test_done(false, "附近找不到这个 WiFi（手表只能连 2.4 GHz）"); return; }
+
+    wifi_config_t wc = {0};
+    strncpy((char *)wc.sta.ssid, s_test.ssid, sizeof(wc.sta.ssid));
+    strncpy((char *)wc.sta.password, s_test.pass, sizeof(wc.sta.password));
+    wc.sta.threshold.authmode = s_test.pass[0] ? WIFI_AUTH_WPA_PSK : WIFI_AUTH_OPEN;
+    esp_wifi_set_config(WIFI_IF_STA, &wc);
+    memset(g_set.ssid, 0, sizeof(g_set.ssid));
+    strncpy(g_set.ssid, s_test.ssid, sizeof(g_set.ssid) - 1);
+    xEventGroupClearBits(s_ev, EV_GOT_IP | EV_DISC);
+    s_leaving = false;
+    s_last_reason = 0;
+    ESP_LOGI(TAG, "testing %s%s", s_test.ssid, found ? "" : " (hidden?)");
+    esp_wifi_connect();
+    EventBits_t b = xEventGroupWaitBits(s_ev, EV_GOT_IP, pdTRUE, pdFALSE, pdMS_TO_TICKS(20000));
+    if (b & EV_GOT_IP) { test_done(true, NULL); return; }
+
+    int r = s_last_reason;
+    s_leaving = true;                                   /* our own give-up is not an error */
+    esp_wifi_disconnect();
+    s_err[0] = 0;                                       /* it was never saved: don't show it as the watch's WiFi error */
+    memcpy(g_set.ssid, prev_ssid, sizeof(prev_ssid));
+    if (r == 15 || r == 204 || r == 202 || r == 2) test_done(false, "密码不对");
+    else if (r == 201 || !found) test_done(false, "附近找不到这个 WiFi（手表只能连 2.4 GHz）");
+    else test_done(false, "连不上（拿不到 IP）");
+}
+
+bool net_wifi_test(const char *ssid, const char *pass, net_test_cb_t cb)
+{
+    if (!ssid[0] || s_test_pending) return false;
+    if (!s_wifi_enabled || !s_wifi_started) { if (cb) cb(false, ssid, "省电模式下 WiFi 关着"); return true; }
+    memset(&s_test, 0, sizeof(s_test));
+    strncpy(s_test.ssid, ssid, 32);
+    strncpy(s_test.pass, pass, 64);
+    s_test_cb = cb;
+    s_test_pending = true;
+    net_wifi_use(true);                                 /* radio on; released in test_done() */
+    return true;
 }
 
 /* time sync job: every 6 h (or at boot), WiFi on just long enough for NTP */

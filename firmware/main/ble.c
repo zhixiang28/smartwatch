@@ -85,6 +85,28 @@ void ble_find_phone(bool on)
     if (om) ble_gatts_notify_custom(s_conn, s_cmd_h, om);
 }
 
+/* Result of trying a network the phone sent: "wifi_ok:<ssid>" or "wifi_fail:<ssid>\n<why>" */
+static void toast_async(void *arg) { ui_toast((const char *)arg); free(arg); }
+static void wifi_test_done(bool ok, const char *ssid, const char *why)
+{
+    char m[200];
+    if (ok) snprintf(m, sizeof(m), "wifi_ok:%s", ssid);
+    else snprintf(m, sizeof(m), "wifi_fail:%s\n%s", ssid, why ? why : "");
+    if (ble_connected()) {
+        int n = strlen(m), max = ble_att_mtu(s_conn) - 3;
+        if (max > 0 && n > max) n = max;
+        struct os_mbuf *om = ble_hs_mbuf_from_flat(m, n);
+        if (om) ble_gatts_notify_custom(s_conn, s_cmd_h, om);
+    }
+    char *t = malloc(120);
+    if (t) {
+        if (ok) snprintf(t, 120, "已加入 %.32s", ssid);
+        else snprintf(t, 120, "%.32s：%s", ssid, why ? why : "连不上");
+        if (ui_lock(200)) { lv_async_call(toast_async, t); ui_unlock(); } else free(t);
+    }
+    ui_kick();
+}
+
 /* ---- health data export, only while a phone is connected ---- */
 static bool emit_line(const char *line)
 {
@@ -157,7 +179,7 @@ static int access_cb(uint16_t conn, uint16_t attr, struct ble_gatt_access_ctxt *
     } else if (which == 4) {                           /* WIFI: "ssid\npassword" */
         char *nl = strchr(buf, '\n');
         if (nl) *nl = 0;
-        net_wifi_add(buf, nl ? nl + 1 : "");
+        if (!net_wifi_test(buf, nl ? nl + 1 : "", wifi_test_done)) wifi_test_done(false, buf, "上一个 WiFi 还在连，等一下再加");
         ui_kick();
     } else if (which == 7) {                           /* LOC: "lat,lon" from the phone's GPS */
         float lat, lon;
