@@ -12,6 +12,8 @@
 #include "host/util/util.h"
 #include "services/gap/ble_svc_gap.h"
 #include "services/gatt/ble_svc_gatt.h"
+#include "host/ble_store.h"
+void ble_store_config_init(void);
 #include "esp_app_desc.h"
 #include "app.h"
 
@@ -29,6 +31,69 @@ static const ble_uuid128_t UUID_LOC = FW_UUID(0x07);
 static const ble_uuid128_t UUID_DATA = FW_UUID(0x08);
 
 static uint16_t s_conn = BLE_HS_CONN_HANDLE_NONE;
+
+/* ---- Remote shutter: standard HID over GATT (consumer control). Android's camera takes a
+ * photo on Volume Up from any keyboard / remote, so no app is needed. HID needs a bonded,
+ * encrypted link; the bond is kept in NVS (CONFIG_BT_NIMBLE_NVS_PERSIST). ---- */
+static const uint8_t HID_REPORT_MAP[] = {
+    0x05, 0x0C,        /* Usage Page (Consumer) */
+    0x09, 0x01,        /* Usage (Consumer Control) */
+    0xA1, 0x01,        /* Collection (Application) */
+    0x85, 0x01,        /*   Report ID 1 */
+    0x15, 0x00, 0x26, 0xFF, 0x03,   /* Logical 0..1023 */
+    0x19, 0x00, 0x2A, 0xFF, 0x03,   /* Usage 0..1023 */
+    0x75, 0x10, 0x95, 0x01,         /* 1 x 16 bit */
+    0x81, 0x00,        /*   Input (Data, Array) */
+    0xC0               /* End Collection */
+};
+static const uint8_t HID_INFO[4] = {0x11, 0x01, 0x00, 0x02};      /* bcdHID 1.11, country 0, normally connectable */
+static const uint8_t HID_REPORT_REF[2] = {0x01, 0x01};             /* report id 1, input */
+static const uint8_t PNP_ID[7] = {0x02, 0xE5, 0x02, 0x01, 0x00, 0x01, 0x00};   /* USB VID 0x02E5 (Espressif), PID 1, v1 */
+static uint16_t s_hid_report_h, s_batt_h;
+static bool s_hid_sub;                /* the host subscribed to the input report */
+static bool s_encrypted;
+
+static int hid_access(uint16_t conn, uint16_t attr, struct ble_gatt_access_ctxt *ctxt, void *arg)
+{
+    int which = (int)(intptr_t)arg;
+    if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR || ctxt->op == BLE_GATT_ACCESS_OP_READ_DSC) {
+        static const uint8_t zero[2] = {0, 0};
+        uint8_t b;
+        switch (which) {
+        case 1: return os_mbuf_append(ctxt->om, HID_INFO, sizeof(HID_INFO)) ? BLE_ATT_ERR_INSUFFICIENT_RES : 0;
+        case 2: return os_mbuf_append(ctxt->om, HID_REPORT_MAP, sizeof(HID_REPORT_MAP)) ? BLE_ATT_ERR_INSUFFICIENT_RES : 0;
+        case 3: return os_mbuf_append(ctxt->om, zero, 2) ? BLE_ATT_ERR_INSUFFICIENT_RES : 0;
+        case 4: return os_mbuf_append(ctxt->om, HID_REPORT_REF, 2) ? BLE_ATT_ERR_INSUFFICIENT_RES : 0;
+        case 5: b = 1; return os_mbuf_append(ctxt->om, &b, 1) ? BLE_ATT_ERR_INSUFFICIENT_RES : 0;   /* report protocol */
+        case 6: b = hw_battery_percent() < 0 ? 100 : hw_battery_percent(); return os_mbuf_append(ctxt->om, &b, 1) ? BLE_ATT_ERR_INSUFFICIENT_RES : 0;
+        case 7: return os_mbuf_append(ctxt->om, PNP_ID, sizeof(PNP_ID)) ? BLE_ATT_ERR_INSUFFICIENT_RES : 0;
+        case 8: return os_mbuf_append(ctxt->om, "FishWatch", 9) ? BLE_ATT_ERR_INSUFFICIENT_RES : 0;
+        }
+        return 0;
+    }
+    return 0;                         /* control point / protocol mode writes: nothing to do */
+}
+
+bool ble_hid_ready(void) { return ble_connected() && s_encrypted && s_hid_sub; }
+bool ble_hid_bonded(void)
+{
+    int n = 0;
+    ble_store_util_count(BLE_STORE_OBJ_TYPE_OUR_SEC, &n);
+    return n > 0;
+}
+
+/* press + release of a consumer key, e.g. 0xE9 Volume Up = camera shutter */
+bool ble_hid_tap(uint16_t usage)
+{
+    if (!ble_hid_ready()) return false;
+    uint8_t down[2] = {usage & 0xFF, usage >> 8}, up[2] = {0, 0};
+    struct os_mbuf *om = ble_hs_mbuf_from_flat(down, 2);
+    if (!om || ble_gatts_notify_custom(s_conn, s_hid_report_h, om)) return false;
+    vTaskDelay(pdMS_TO_TICKS(40));
+    om = ble_hs_mbuf_from_flat(up, 2);
+    return om && ble_gatts_notify_custom(s_conn, s_hid_report_h, om) == 0;
+}
+
 static uint16_t s_status_h, s_cmd_h, s_data_h;
 static volatile bool s_syncing;
 static bool s_authed;
@@ -246,6 +311,39 @@ static const struct ble_gatt_svc_def s_svcs[] = {
             { 0 }
         },
     },
+    {   /* HID: reading the report map / report needs an encrypted (bonded) link */
+        .type = BLE_GATT_SVC_TYPE_PRIMARY,
+        .uuid = BLE_UUID16_DECLARE(0x1812),
+        .characteristics = (struct ble_gatt_chr_def[]) {
+            { .uuid = BLE_UUID16_DECLARE(0x2A4A), .access_cb = hid_access, .arg = (void *)1, .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_READ_ENC },
+            { .uuid = BLE_UUID16_DECLARE(0x2A4B), .access_cb = hid_access, .arg = (void *)2, .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_READ_ENC },
+            { .uuid = BLE_UUID16_DECLARE(0x2A4C), .access_cb = hid_access, .arg = (void *)0, .flags = BLE_GATT_CHR_F_WRITE_NO_RSP | BLE_GATT_CHR_F_WRITE_ENC },
+            { .uuid = BLE_UUID16_DECLARE(0x2A4E), .access_cb = hid_access, .arg = (void *)5, .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE_NO_RSP | BLE_GATT_CHR_F_READ_ENC | BLE_GATT_CHR_F_WRITE_ENC },
+            { .uuid = BLE_UUID16_DECLARE(0x2A4D), .access_cb = hid_access, .arg = (void *)3,
+              .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY | BLE_GATT_CHR_F_READ_ENC, .val_handle = &s_hid_report_h,
+              .descriptors = (struct ble_gatt_dsc_def[]) {
+                  { .uuid = BLE_UUID16_DECLARE(0x2908), .att_flags = BLE_ATT_F_READ | BLE_ATT_F_READ_ENC, .access_cb = hid_access, .arg = (void *)4 },
+                  { 0 } } },
+            { 0 }
+        },
+    },
+    {   /* battery level (Android shows it for HID devices) */
+        .type = BLE_GATT_SVC_TYPE_PRIMARY,
+        .uuid = BLE_UUID16_DECLARE(0x180F),
+        .characteristics = (struct ble_gatt_chr_def[]) {
+            { .uuid = BLE_UUID16_DECLARE(0x2A19), .access_cb = hid_access, .arg = (void *)6, .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY, .val_handle = &s_batt_h },
+            { 0 }
+        },
+    },
+    {   /* device information: PnP ID is what HID hosts look for */
+        .type = BLE_GATT_SVC_TYPE_PRIMARY,
+        .uuid = BLE_UUID16_DECLARE(0x180A),
+        .characteristics = (struct ble_gatt_chr_def[]) {
+            { .uuid = BLE_UUID16_DECLARE(0x2A50), .access_cb = hid_access, .arg = (void *)7, .flags = BLE_GATT_CHR_F_READ },
+            { .uuid = BLE_UUID16_DECLARE(0x2A29), .access_cb = hid_access, .arg = (void *)8, .flags = BLE_GATT_CHR_F_READ },
+            { 0 }
+        },
+    },
     { 0 }
 };
 
@@ -255,13 +353,15 @@ static int gap_cb(struct ble_gap_event *ev, void *arg)
 {
     switch (ev->type) {
     case BLE_GAP_EVENT_CONNECT:
-        if (ev->connect.status == 0) { s_conn = ev->connect.conn_handle; s_authed = false; }
+        if (ev->connect.status == 0) { s_conn = ev->connect.conn_handle; s_authed = false; s_encrypted = false; s_hid_sub = false; }
         else advertise();
         ui_kick();
         break;
     case BLE_GAP_EVENT_DISCONNECT:
         s_conn = BLE_HS_CONN_HANDLE_NONE;
         s_authed = false;
+        s_encrypted = false;
+        s_hid_sub = false;
         s_idle_since = esp_timer_get_time();
         if (s_on) advertise();
         ui_kick();
@@ -269,6 +369,20 @@ static int gap_cb(struct ble_gap_event *ev, void *arg)
     case BLE_GAP_EVENT_ADV_COMPLETE:
         if (s_on) advertise();
         break;
+    case BLE_GAP_EVENT_ENC_CHANGE:
+        s_encrypted = ev->enc_change.status == 0;
+        ESP_LOGI(TAG, "encryption %s", s_encrypted ? "on" : "failed");
+        ui_kick();
+        break;
+    case BLE_GAP_EVENT_SUBSCRIBE:
+        if (ev->subscribe.attr_handle == s_hid_report_h) { s_hid_sub = ev->subscribe.cur_notify; ui_kick(); }
+        break;
+    case BLE_GAP_EVENT_REPEAT_PAIRING: {
+        /* the phone forgot us and pairs again: drop our old bond and accept */
+        struct ble_gap_conn_desc d;
+        if (ble_gap_conn_find(ev->repeat_pairing.conn_handle, &d) == 0) ble_store_util_delete_peer(&d.peer_id_addr);
+        return BLE_GAP_REPEAT_PAIRING_RETRY;
+    }
     default:
         break;
     }
@@ -283,6 +397,12 @@ static void advertise(void)
     f.name = (uint8_t *)name;
     f.name_len = strlen(name);
     f.name_is_complete = 1;
+    static const ble_uuid16_t hid_uuid = BLE_UUID16_INIT(0x1812);
+    f.uuids16 = &hid_uuid;
+    f.num_uuids16 = 1;
+    f.uuids16_is_complete = 0;
+    f.appearance = 0x0180;            /* generic remote control */
+    f.appearance_is_present = 1;
     ble_gap_adv_set_fields(&f);
     struct ble_hs_adv_fields rsp = {0};
     rsp.uuids128 = (ble_uuid128_t *)&UUID_SVC;
@@ -315,6 +435,14 @@ static void ble_lazy_init(void)
     if (s_inited) return;
     if (nimble_port_init() != ESP_OK) { ESP_LOGE(TAG, "nimble init failed"); return; }
     ble_hs_cfg.sync_cb = on_sync;
+    ble_hs_cfg.store_status_cb = ble_store_util_status_rr;
+    ble_hs_cfg.sm_io_cap = BLE_HS_IO_NO_INPUT_OUTPUT;   /* "just works" pairing from Android settings */
+    ble_hs_cfg.sm_bonding = 1;
+    ble_hs_cfg.sm_mitm = 0;
+    ble_hs_cfg.sm_sc = 1;
+    ble_hs_cfg.sm_our_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
+    ble_hs_cfg.sm_their_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
+    ble_store_config_init();
     ble_svc_gap_init();
     ble_svc_gatt_init();
     ble_gatts_count_cfg(s_svcs);

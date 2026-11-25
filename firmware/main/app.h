@@ -156,6 +156,9 @@ bool ble_authed(void);
 uint16_t ble_pair_code(void);
 void ble_new_code(void);
 void ble_find_phone(bool on);
+bool ble_hid_ready(void);          /* a bonded phone is connected and listening for keys */
+bool ble_hid_bonded(void);
+bool ble_hid_tap(uint16_t usage);  /* consumer key press+release, 0xE9 = Volume Up (camera shutter) */
 void ble_notify_status(void);
 void ble_start(void);
 void ble_stop(void);
@@ -206,6 +209,7 @@ void alarm_check(void);
 void focus_check(void);
 void app_light(lv_obj_t *root);
 void app_game(lv_obj_t *root);
+void app_camera(lv_obj_t *root);
 void reminders_check(void);
 void tank_attention(const char *msg);
 void app_soon_set(const char *name, const char *desc);

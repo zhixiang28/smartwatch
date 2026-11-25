@@ -30,7 +30,7 @@ static const app_def_t APPS[] = {
     {"专注", CAT_FIT, &img_icon_fo, app_focus, NULL},
     {"音乐", CAT_MED, &img_icon_mu, NULL, "网络电台，用手表喇叭播放。下一版加入。"},
     {"录音", CAT_MED, &img_icon_rc, app_recorder, NULL},
-    {"遥控拍照", CAT_MED, &img_icon_cm, NULL, "按一下让手机拍照。下一版加入。"},
+    {"遥控拍照", CAT_MED, &img_icon_cm, app_camera, NULL},
     {"闹钟", CAT_LIFE, &img_icon_al, app_alarm, NULL},
     {"天气", CAT_LIFE, &img_icon_we, app_weather, NULL},
     {"手电筒", CAT_LIFE, &img_icon_fl, app_flashlight, NULL},
