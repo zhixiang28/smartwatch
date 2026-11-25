@@ -244,7 +244,7 @@ void alarm_check(void)
 
 /* ======================= Voice recorder ======================= */
 #define REC_RATE 24000
-#define REC_MAX_S 60
+#define REC_MAX_S 30      /* 1.4 MB of PSRAM while the app is open; freed when it closes */
 static int16_t *s_rec;
 static volatile int s_rec_len;            /* samples */
 static volatile bool s_recording, s_playing;
@@ -376,13 +376,17 @@ static void rec_close(void)
     s_playing = false;
     if (s_rec_tm) { lv_timer_delete(s_rec_tm); s_rec_tm = NULL; }
     power_keep_awake(false);
+    vTaskDelay(pdMS_TO_TICKS(400));                     /* let the record / play task see the flags and exit */
+    if (s_rec) { heap_caps_free(s_rec); s_rec = NULL; }
+    s_rec_len = 0;
 }
 
 void app_recorder(lv_obj_t *root)
 {
     ui_header(root, "录音", 0xFCA5A5);
     if (!s_rec) s_rec = heap_caps_malloc(REC_RATE * REC_MAX_S * 2, MALLOC_CAP_SPIRAM);
-    if (!s_rec) { ui_label(root, &font_cn20, C_TEXT, "内存不足"); return; }
+    if (!s_rec) { ui_no_mem(root); return; }
+    s_rec_len = 0;
     s_rec_lbl = ui_label(root, &font_num, C_TEXT, "00:00");
     lv_obj_align(s_rec_lbl, LV_ALIGN_TOP_MID, 0, 100);
     s_rec_state = ui_label(root, &font_cn16, 0xFCA5A5, "");

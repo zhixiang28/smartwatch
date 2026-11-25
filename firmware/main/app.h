@@ -196,6 +196,7 @@ lv_obj_t *ui_pill_btn(lv_obj_t *parent, const char *txt, uint32_t bg, uint32_t f
 lv_obj_t *ui_icon(lv_obj_t *parent, const lv_image_dsc_t *img, uint32_t color);
 lv_obj_t *ui_header(lv_obj_t *root, const char *title, uint32_t accent);
 void ui_toast(const char *txt);
+void ui_no_mem(lv_obj_t *root);
 void ui_add_edge_back(lv_obj_t *scr);
 
 lv_obj_t *tank_create(void);

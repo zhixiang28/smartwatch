@@ -558,11 +558,13 @@ static bool has_cjk(const char *t)
 static void xl_task(void *arg)
 {
     char *q = heap_caps_malloc(1024, MALLOC_CAP_SPIRAM), *url = heap_caps_malloc(1400, MALLOC_CAP_SPIRAM);
-    uint8_t *buf = heap_caps_malloc(160 * 1024, MALLOC_CAP_SPIRAM);
+    uint8_t *buf = NULL;                /* 160 KB only while a translation runs */
     char text[240], tr[480];
     for (;;) {
+        if (buf) { heap_caps_free(buf); buf = NULL; }
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-        if (!q || !url || !buf) continue;
+        buf = heap_caps_malloc(160 * 1024, MALLOC_CAP_SPIRAM);
+        if (!q || !url || !buf) { set_txt(s_bot, sizeof(s_bot), "翻译失败（内存不足，重启手表试试）"); s_st = XZ_READY; continue; }
         send_json("{\"session_id\":\"%s\",\"type\":\"abort\"%s}", NULL);   /* stop 小智 answering */
         taskENTER_CRITICAL(&s_txt_mux);
         memcpy(text, s_xl_text, sizeof(text));

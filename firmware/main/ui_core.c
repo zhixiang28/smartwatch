@@ -1,4 +1,6 @@
 #include <string.h>
+#include <stdio.h>
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "bsp/esp-bsp.h"
 #include "app.h"
@@ -262,4 +264,17 @@ void ui_init(void)
     s_apps = apps_create();
     lv_screen_load(s_tank);
     tank_on_show();
+}
+
+/* An app couldn't get its memory: say so in the middle of the screen, with what is left. */
+void ui_no_mem(lv_obj_t *root)
+{
+    char t[96];
+    snprintf(t, sizeof(t), "内存不足\n大内存剩 %uK · 内部剩 %uK\n重启手表通常就好",
+             (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM) / 1024),
+             (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024));
+    lv_obj_t *l = ui_label(root, &font_cn20, C_TEXT, t);
+    lv_obj_set_width(l, 360);
+    lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(l, LV_ALIGN_CENTER, 0, 0);
 }

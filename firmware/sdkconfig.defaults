@@ -77,3 +77,9 @@ CONFIG_BT_NIMBLE_NVS_PERSIST=y
 # 小智: websocket client task stack + structures in PSRAM (internal RAM is the scarce part)
 CONFIG_ESP_WS_CLIENT_TASK_STACK_IN_EXT_RAM=y
 CONFIG_ESP_WS_CLIENT_ALLOC_IN_EXT_RAM=y
+# internal RAM: WiFi + Bluetooth + display + TLS all need it. Keep WiFi's driver code in flash
+# (it runs from the PSRAM cache) and let ordinary malloc() use PSRAM first; drivers that need
+# internal / DMA memory ask for it explicitly, and FreeRTOS objects are always internal.
+CONFIG_ESP_WIFI_IRAM_OPT=n
+CONFIG_ESP_WIFI_RX_IRAM_OPT=n
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=0

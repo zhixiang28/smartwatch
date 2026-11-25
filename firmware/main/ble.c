@@ -5,6 +5,8 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
+#include "esp_heap_caps.h"
 #include <stdlib.h>
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
@@ -132,12 +134,15 @@ static int status_json(char *buf, int len)
     json_esc(ssid, sizeof(ssid), g_set.ssid);
     int n = snprintf(buf, len,
         "{\"ver\":\"%s\",\"auth\":%s,\"batt\":%d,\"chg\":%s,\"wifi\":%s,\"ssid\":\"%s\",\"time\":%s,\"tz\":%d,"
-        "\"hunger\":%d,\"dirt\":%d,\"workouts\":%u,\"total\":%lu,\"steps\":%lu,\"nets\":%s,\"rs\":%d,\"rw\":%d,\"lk\":%s,\"la\":%s,\"rst\":\"%s\",\"dump\":%s,\"xzs\":%d,\"xzc\":\"%s\"}",
+        "\"hunger\":%d,\"dirt\":%d,\"workouts\":%u,\"total\":%lu,\"steps\":%lu,\"nets\":%s,\"rs\":%d,\"rw\":%d,\"lk\":%s,\"la\":%s,\"rst\":\"%s\",\"dump\":%s,\"xzs\":%d,\"xzc\":\"%s\",\"mi\":%u,\"mb\":%u,\"mm\":%u,\"pf\":%u,\"pb\":%u}",
         esp_app_get_description()->version, s_authed ? "true" : "false", hw_battery_percent(), hw_charging() ? "true" : "false",
         net_wifi_connected() ? "true" : "false", ssid, net_time_valid() ? "true" : "false", g_set.tz_min,
         (int)g_set.hunger, (int)g_set.dirt, g_set.workouts, (unsigned long)g_set.total_kg, (unsigned long)g_set.steps, nets, g_set.remind_sit, g_set.remind_water, g_set.light_key[0] ? "true" : "false",
         g_set.light_person[0] && g_set.light_pin[0] ? "true" : "false",
-        diag_reset_reason(), diag_has_dump() ? "true" : "false", xz_state(), xz_code());
+        diag_reset_reason(), diag_has_dump() ? "true" : "false", xz_state(), xz_code(),
+        (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024), (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL) / 1024),
+        (unsigned)(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL) / 1024),
+        (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024), (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM) / 1024));
     free(nets);
     return n < len ? n : len - 1;
 }
@@ -463,7 +468,7 @@ static void host_task(void *param)
 
 /* Bluetooth is off unless the user turns it on (pairing, find phone).
  * It switches itself off after 3 minutes without a phone connected. */
-static void ble_lazy_init(void)
+static void ble_do_init(void)
 {
     if (s_inited) return;
     if (nimble_port_init() != ESP_OK) { ESP_LOGE(TAG, "nimble init failed"); return; }
@@ -483,6 +488,24 @@ static void ble_lazy_init(void)
     ble_svc_gap_device_name_set("FishWatch");
     nimble_port_freertos_init(host_task);
     s_inited = true;
+}
+
+/* Brought up on a short-lived task with an internal-RAM stack: the UI task (where the
+ * "turn Bluetooth on" tap lands) was the wrong place, and bringing it up at boot (0.8.5)
+ * kept the controller's internal RAM for good, which starved TLS for WiFi features. */
+static SemaphoreHandle_t s_init_done;
+static void init_task(void *arg)
+{
+    ble_do_init();
+    xSemaphoreGive(s_init_done);
+    vTaskDelete(NULL);
+}
+static void ble_lazy_init(void)
+{
+    if (s_inited) return;
+    if (!s_init_done && !(s_init_done = xSemaphoreCreateBinary())) return;
+    if (xTaskCreatePinnedToCore(init_task, "ble_init", 6144, NULL, 5, NULL, 0) != pdPASS) { ESP_LOGE(TAG, "ble init task"); return; }
+    xSemaphoreTake(s_init_done, pdMS_TO_TICKS(5000));
 }
 
 bool ble_is_on(void) { return s_on; }
@@ -512,12 +535,8 @@ void ble_poll(void)
     if (s_on && !g_set.notif_on && !ble_connected() && esp_timer_get_time() - s_idle_since > 180LL * 1000000) ble_stop();
 }
 
-/* The NimBLE stack + controller are brought up at boot, while internal RAM is still in one piece
- * and from the main task's 16 KB stack. Doing it on the first "turn Bluetooth on" tap ran it
- * on the UI task, and the first time after power-on the watch rebooted. It only advertises
- * once switched on. */
+/* Bluetooth stays off (no RAM taken) until it is switched on. */
 void ble_init(void)
 {
     ble_new_code();
-    if (!g_safe_mode) ble_lazy_init();
 }

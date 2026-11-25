@@ -149,7 +149,7 @@ static void nv_open(lv_event_t *e)
 {
     if (s_nv) return;
     s_nv_buf = heap_caps_malloc(NOTE_W * NOTE_H * 2, MALLOC_CAP_SPIRAM);
-    if (!s_nv_buf) { ui_toast("内存不足"); return; }
+    if (!s_nv_buf) { char t[64]; snprintf(t, sizeof(t), "内存不足（剩 %uK）", (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM) / 1024)); ui_toast(t); return; }
     s_nv = lv_obj_create(lv_obj_get_parent(lv_obj_get_parent(lv_event_get_target(e))));   /* covers the whole screen */
     lv_obj_set_size(s_nv, SCR_W, SCR_H);
     lv_obj_set_style_bg_color(s_nv, lv_color_black(), 0);
@@ -178,7 +178,7 @@ void app_notes(lv_obj_t *root)
 {
     ui_header(root, "笔记", 0xFCD34D);
     s_note_buf = heap_caps_malloc(NOTE_W * NOTE_H * 2, MALLOC_CAP_SPIRAM);
-    if (!s_note_buf) { ui_label(root, &font_cn20, C_TEXT, "内存不足"); return; }
+    if (!s_note_buf) { ui_no_mem(root); return; }
     g_app_close = notes_close;
     s_canvas = lv_canvas_create(root);
     lv_canvas_set_buffer(s_canvas, s_note_buf, NOTE_W, NOTE_H, LV_COLOR_FORMAT_RGB565);
