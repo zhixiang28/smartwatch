@@ -350,7 +350,7 @@ async function pair() {
     if (!dev.gatt.connected) { setState('手表蓝牙断开了，再点一次"连接"', 'warn'); return; }
     localStorage.removeItem('fw_code');
     $('pairBox').style.display = 'block';
-    setState('配对码不对，再看一下手表', 'warn');
+    setState('配对失败：确认配对码，或把手机蓝牙关掉再打开后重试', 'warn');
     return;
   }
   localStorage.setItem('fw_code', code);
