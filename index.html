@@ -58,6 +58,13 @@
   #find.on{display:flex}
   #unsup{display:none;background:#2c1515;border-radius:14px;padding:14px 16px;margin-bottom:12px;font-size:14px}
   #log{font:12px/1.4 ui-monospace,monospace;color:#555;white-space:pre-wrap;margin:14px 6px 0;max-height:110px;overflow:auto}
+  #scan{display:none;position:fixed;inset:0;background:#000;z-index:10;flex-direction:column;align-items:center;justify-content:center;gap:18px;padding:20px;text-align:center}
+  #scan.on{display:flex}
+  #scan .vf{position:relative;width:min(80vw,340px);aspect-ratio:1;border-radius:22px;overflow:hidden;background:#111}
+  #scan video{width:100%;height:100%;object-fit:cover}
+  #scan .vf::after{content:"";position:absolute;inset:14%;border:3px solid var(--teal);border-radius:16px;box-shadow:0 0 0 999px rgba(0,0,0,.35)}
+  .qrbtn{background:var(--card2);color:var(--text);width:44px;padding:0;display:flex;align-items:center;justify-content:center;flex:none}
+  .qrbtn svg{width:22px;height:22px}
   svg text{font-family:system-ui,"Noto Sans SC",sans-serif}
 </style>
 </head>
@@ -77,12 +84,13 @@
       <div style="font-weight:600">Smart Watch</div>
       <div id="st" style="font-size:13px;color:var(--dim)">未连接 · 数据是上次同步的</div>
     </div>
+    <button id="btnScan" class="qrbtn" aria-label="扫手表上的二维码" title="扫二维码"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 8V5a1 1 0 0 1 1-1h3M16 4h3a1 1 0 0 1 1 1v3M20 16v3a1 1 0 0 1-1 1h-3M8 20H5a1 1 0 0 1-1-1v-3M7 12h10"/></svg></button>
     <button id="btnConn" class="pri">连接</button>
   </div>
   <div id="pairBox" class="card" style="display:none">
     <h3>配对码<span style="font-weight:400">手表：手机设定 → 开启蓝牙配对</span></h3>
     <div class="code"><input id="code" inputmode="numeric" maxlength="4" placeholder="····" aria-label="配对码"></div>
-    <div style="display:flex;justify-content:center;margin-top:12px"><button id="btnPair" class="pri">配对</button></div>
+    <div style="display:flex;justify-content:center;gap:10px;margin-top:12px"><button id="btnScan2" class="sec">扫二维码</button><button id="btnPair" class="pri">配对</button></div>
   </div>
 
   <!-- ============ HEALTH ============ -->
@@ -171,6 +179,12 @@
   <button data-p="p-set"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M5 19l2-2M17 7l2-2"/></svg>设定</button>
 </nav>
 
+<div id="scan">
+  <div style="font-size:22px;font-weight:700">扫手表上的二维码</div>
+  <div class="vf"><video id="scanVid" playsinline muted></video></div>
+  <div id="scanMsg" style="color:var(--dim);font-size:14px">手表：手机设定 → 开启蓝牙配对，屏幕上会出现二维码</div>
+  <button id="btnScanX" class="sec" style="width:160px">取消</button>
+</div>
 <div id="find"><div style="font-size:26px;font-weight:700">手表在找手机</div><div style="color:var(--dim)">手机正在响</div><button id="btnFound" class="pri" style="width:200px">找到了</button></div>
 
 <script>
@@ -301,6 +315,7 @@ function setState(t, cls) { $('st').textContent = t; $('st').style.color = cls =
 async function write(c, text) { if (!ch[c]) throw new Error('手表固件太旧'); await ch[c].writeValueWithResponse(enc.encode(text)); }
 
 $('btnConn').onclick = async () => {
+  $('btnConn').style.boxShadow = '';
   try { audio = audio || new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {}
   if (dev && dev.gatt.connected) { dev.gatt.disconnect(); return; }
   try {
@@ -430,6 +445,71 @@ $('btnInstall').onclick = async () => {
   installEvt = null;
 };
 if (!standalone && /iphone|ipad|ipod/i.test(navigator.userAgent)) $('iosTip').style.display = 'block';
+
+/* ---------- QR scan: watch shows a QR with the app link + ?code=1234 ---------- */
+let scanStream, scanTimer, detector;
+function codeFromQr(t) {
+  t = (t || '').trim();
+  if (/^\d{4}$/.test(t)) return t;
+  const m = t.match(/[?&#]code=(\d{4})(?!\d)/);
+  return m ? m[1] : null;
+}
+function loadJsQR() {
+  return window.jsQR ? Promise.resolve() : new Promise((ok, no) => { const sc = document.createElement('script'); sc.src = 'vendor/jsQR.js'; sc.onload = ok; sc.onerror = () => no(new Error('扫码组件载入失败')); document.head.appendChild(sc); });
+}
+async function startScan() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { log('这个浏览器不能用相机，请手动输入配对码'); return; }
+  $('scan').classList.add('on'); $('scanMsg').textContent = '手表：手机设定 → 开启蓝牙配对，屏幕上会出现二维码';
+  try {
+    scanStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false });
+    const v = $('scanVid'); v.srcObject = scanStream; await v.play();
+    if ('BarcodeDetector' in window) { try { detector = new BarcodeDetector({ formats: ['qr_code'] }); } catch (e) { detector = null; } }
+    if (!detector) await loadJsQR();
+    const cv = document.createElement('canvas'), cx = cv.getContext('2d', { willReadFrequently: true });
+    const tick = async () => {
+      if (!scanStream) return;
+      let txt = null;
+      try {
+        if (v.readyState >= 2) {
+          if (detector) { const r = await detector.detect(v); if (r.length) txt = r[0].rawValue; }
+          else {
+            const w = v.videoWidth, h = v.videoHeight, sz = Math.min(w, h), k = Math.min(1, 640 / sz);
+            cv.width = cv.height = Math.round(sz * k);
+            cx.drawImage(v, (w - sz) / 2, (h - sz) / 2, sz, sz, 0, 0, cv.width, cv.height);
+            const r = jsQR(cx.getImageData(0, 0, cv.width, cv.height).data, cv.width, cv.height, { inversionAttempts: 'attemptBoth' });
+            if (r) txt = r.data;
+          }
+        }
+      } catch (e) {}
+      if (txt) {
+        const c = codeFromQr(txt);
+        if (c) { onScanned(c); return; }
+        $('scanMsg').textContent = '这不是手表的二维码';
+      }
+      scanTimer = setTimeout(tick, 200);
+    };
+    tick();
+  } catch (e) {
+    stopScan();
+    log('相机打不开：' + e.message);
+    setState('相机打不开，请手动输入配对码', 'warn');
+  }
+}
+function stopScan() {
+  clearTimeout(scanTimer);
+  if (scanStream) scanStream.getTracks().forEach(t => t.stop());
+  scanStream = null; $('scanVid').srcObject = null; $('scan').classList.remove('on');
+}
+function onScanned(c) {
+  stopScan();
+  if (navigator.vibrate) navigator.vibrate(60);
+  $('code').value = c; localStorage.setItem('fw_code', c);
+  log('已扫到配对码');
+  if (dev && dev.gatt.connected) pair();
+  else { setState('已扫到配对码 ' + c + ' · 点"连接"', 'ok'); $('btnConn').style.boxShadow = '0 0 0 4px rgba(10,132,255,.35)'; }
+}
+$('btnScan').onclick = startScan; $('btnScan2').onclick = startScan; $('btnScanX').onclick = stopScan;
+document.addEventListener('visibilitychange', () => { if (document.hidden && scanStream) stopScan(); });
 
 /* find my phone */
 function startRing() {
