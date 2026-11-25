@@ -22,7 +22,10 @@ static const char *TAG = "extra";
 #define SB_URL "https://ogxuwchojexznsxvvdhi.supabase.co"
 #define SB_KEY "sb_publishable_pB5HMEXMjVDQiNcWlenV1A_ETc2qaNP"   /* publishable key: safe to ship */
 
-static char s_l_state[2][4];               /* "ON" / "OFF" / "" */
+static char s_l_state[2][4];               /* what the light really is: "ON" / "OFF" / "" */
+/* smartlight.invert1/2: the servo is mounted the other way round, so the stored state is the
+ * servo command and the light is the opposite (the server's run_light_timer does the same). */
+static bool s_l_inv[2];
 static volatile bool s_l_busy;
 static volatile int s_l_err;               /* 0 ok, 1 network, 2 key */
 static char s_l_detail[96];
@@ -91,12 +94,13 @@ static void light_job(int ch)
         s_l_err = 1; s_l_busy = false; light_kick(); return;
     }
     if (ch && g_set.light_person[0] && g_set.light_pin[0]) {
-        const char *now = s_l_state[ch - 1];
+        bool want_on = strcmp(s_l_state[ch - 1], "ON") != 0;              /* flip what the light really is */
+        const char *cmd = want_on != s_l_inv[ch - 1] ? "ON" : "OFF";       /* ...as a servo command */
         char body[200], pin[70], who[80];
         json_esc(pin, sizeof(pin), g_set.light_pin);
         json_esc(who, sizeof(who), g_set.light_person);
         snprintf(body, sizeof(body), "{\"p_person_id\":\"%s\",\"p_pin\":\"%s\",\"ch\":%d,\"new_state\":\"%s\"}",
-                 who, pin, ch, strcmp(now, "ON") ? "ON" : "OFF");
+                 who, pin, ch, cmd);
         int st = http_call("/rest/v1/rpc/light_set", body, buf, sizeof(buf));
         s_l_err = st == 200 ? 0 : (st >= 400 ? 2 : 1);
         if (st >= 400 && strstr(buf, "not signed in")) {
@@ -109,13 +113,18 @@ static void light_job(int ch)
         } else if (st >= 400) snprintf(s_l_detail, sizeof(s_l_detail), "服务器回应 %d：%.60s", st, buf);
         ESP_LOGI(TAG, "light set ch%d -> %d %s", ch, st, st == 200 ? buf : "");
     }
-    int st = http_call("/rest/v1/smartlight?id=eq.1&select=state,state2", NULL, buf, sizeof(buf));
+    int st = http_call("/rest/v1/smartlight?id=eq.1&select=state,state2,invert1,invert2", NULL, buf, sizeof(buf));
     if (st == 200) {
         cJSON *j = cJSON_Parse(buf), *o = j ? cJSON_GetArrayItem(j, 0) : NULL;
         if (o) {
-            cJSON *a = cJSON_GetObjectItem(o, "state"), *b = cJSON_GetObjectItem(o, "state2");
-            snprintf(s_l_state[0], 4, "%s", cJSON_IsString(a) ? a->valuestring : "");
-            snprintf(s_l_state[1], 4, "%s", cJSON_IsString(b) ? b->valuestring : "");
+            const char *sk[2] = {"state", "state2"}, *ik[2] = {"invert1", "invert2"};
+            for (int i = 0; i < 2; i++) {
+                cJSON *v = cJSON_GetObjectItem(o, sk[i]);
+                s_l_inv[i] = cJSON_IsTrue(cJSON_GetObjectItem(o, ik[i]));
+                if (!cJSON_IsString(v)) { s_l_state[i][0] = 0; continue; }
+                bool on = !strcmp(v->valuestring, "ON") != s_l_inv[i];
+                snprintf(s_l_state[i], 4, "%s", on ? "ON" : "OFF");
+            }
             if (!ch) s_l_err = 0;
         } else if (!ch) {
             s_l_err = 1;
