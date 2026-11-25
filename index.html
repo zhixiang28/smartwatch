@@ -151,7 +151,8 @@
       <div class="it"><label for="pass" class="k">密码</label><input id="pass" type="password" placeholder="没有就留空"></div>
       <div class="it" style="justify-content:flex-end"><button id="btnWifi" class="sec">加入手表</button></div>
     </div>
-    <p class="note">最多记住 6 个，只支持 2.4 GHz。WiFi 平时关着，需要时（对时、天气、开灯）才会打开。</p>
+    <p class="note" id="wifiMsg" style="display:none"></p>
+    <p class="note">最多记住 6 个，只支持 2.4 GHz。手表会先试连，连得上才记住。WiFi 平时关着，需要时（对时、天气、开灯）才会打开。</p>
     <div class="hd">提醒</div>
     <div class="card" style="padding:4px 16px">
       <div class="it"><label class="k" for="rs">久坐提醒（1 小时没走动）</label><input type="checkbox" id="rs" style="flex:none;width:22px;height:22px"></div>
@@ -383,7 +384,11 @@ async function pair() {
     await gatt(() => ch.STATUS.startNotifications());
   });
   await step('命令通知', async () => {
-    ch.CMD.oncharacteristicvaluechanged = e => { const m = dec.decode(e.target.value); if (m === 'find') startRing(); else if (m === 'find_stop') stopRing(); };
+    ch.CMD.oncharacteristicvaluechanged = e => {
+      const m = dec.decode(e.target.value);
+      if (m === 'find') startRing(); else if (m === 'find_stop') stopRing();
+      else if (m.startsWith('wifi_ok:') || m.startsWith('wifi_fail:')) onWifiResult(m);
+    };
     await gatt(() => ch.CMD.startNotifications());
   });
   await step('对时', syncTime);
@@ -482,8 +487,42 @@ $('btnWifi').onclick = async () => {
     if (alt) { if (ok) { s = alt; $('ssid').value = alt; } }
     else if (!ok) return;
   }
-  try { await write('WIFI', s + '\n' + $('pass').value); log('已加入，手表会自动连接'); $('ssid').value = ''; $('pass').value = ''; } catch (e) { log('失败：' + e.message); }
+  if (wifiWait) return;
+  wifiMsg('手表正在试连「' + s + '」…（最多约 1 分钟）', '');
+  $('btnWifi').disabled = true;
+  try { await write('WIFI', s + '\n' + $('pass').value); }
+  catch (e) { $('btnWifi').disabled = false; wifiMsg('没送到手表：' + e.message, 'var(--orange)'); return; }
+  /* firmware 0.7.6+ tries the network first and answers wifi_ok / wifi_fail on CMD */
+  const r = await new Promise(ok => {
+    wifiWait = { ssid: s, ok };
+    setTimeout(() => ok(null), 75000);
+  });
+  wifiWait = null;
+  $('btnWifi').disabled = false;
+  if (r === null) { wifiMsg('手表没有回报结果（固件可能比较旧，旧固件会直接记住）。', 'var(--dim)'); $('ssid').value = ''; $('pass').value = ''; return; }
+  if (r.ok) {
+    wifiMsg('✓ 连上了，手表已记住「' + r.ssid + '」。', 'var(--green)');
+    log('WiFi 已加入：' + r.ssid);
+    $('ssid').value = ''; $('pass').value = '';
+  } else {
+    let hint = '';
+    if (/找不到/.test(r.why)) hint = '检查名字是否一字不差（大小写、空格、底线），并确认是 2.4 GHz。';
+    else if (/密码/.test(r.why)) hint = '检查密码（大小写）。';
+    else if (/IP/.test(r.why)) hint = '可能信号太弱，或路由器不让新设备加入。';
+    wifiMsg('✗ 没有记住「' + r.ssid + '」：' + r.why + (hint ? '。' + hint : ''), 'var(--orange)');
+    log('WiFi 被拒：' + r.ssid + ' · ' + r.why);
+  }
 };
+
+let wifiWait = null;
+function wifiMsg(t, color) { const el = $('wifiMsg'); el.textContent = t; el.style.color = color || ''; el.style.display = t ? 'block' : 'none'; }
+function onWifiResult(m) {
+  const ok = m.startsWith('wifi_ok:');
+  const rest = m.slice(ok ? 8 : 10), nl = rest.indexOf('\n');
+  const r = { ok, ssid: nl >= 0 ? rest.slice(0, nl) : rest, why: nl >= 0 ? rest.slice(nl + 1) : '' };
+  if (wifiWait) wifiWait.ok(r);
+  else if (!ok) wifiMsg('✗ 没有记住「' + r.ssid + '」：' + r.why, 'var(--orange)');
+}
 $('btnGoal').onclick = () => { const g = parseInt($('goal').value); if (g >= 1000) write('CMD', 'goal:' + g).then(() => { if (db.info) db.info.goal = g; saveDb(); render(); log('目标已设定'); }).catch(e => log(e.message)); };
 $('btnTime').onclick = () => syncTime().catch(e => log(e.message));
 const sendRemind = () => write('CMD', 'remind:' + ($('rs').checked ? 1 : 0) + ($('rw').checked ? 1 : 0)).then(() => log('提醒已更新')).catch(e => log(e.message));
