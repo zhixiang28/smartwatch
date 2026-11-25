@@ -322,7 +322,11 @@ async function write(c, text) {
   if (!(dev && dev.gatt.connected)) throw new Error('手表没连接，先点上面的"连接"');
   if (c !== 'AUTH' && !paired) throw new Error('还没配对，先输入手表上的配对码');
   if (!ch[c]) throw new Error(`手表没有「${CH_NAME[c] || c}」功能（固件太旧，或手机蓝牙缓存没更新）`);
-  return gatt(() => ch[c].writeValueWithResponse(enc.encode(text))); }
+  /* the watch answers ATT error 3 (write not permitted) when this connection hasn't passed AUTH */
+  return gatt(() => ch[c].writeValueWithResponse(enc.encode(text))).catch(e => {
+    if (c !== 'AUTH' && /not permitted/i.test(e.message)) { paired = false; throw new Error('手表说还没配对，断开再连一次'); }
+    throw e;
+  }); }
 
 $('btnConn').onclick = async () => {
   $('btnConn').style.boxShadow = '';
