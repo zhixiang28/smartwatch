@@ -312,7 +312,11 @@ if (qcode && /^\d{4}$/.test(qcode)) {
 
 /* ---------- Bluetooth ---------- */
 function setState(t, cls) { $('st').textContent = t; $('st').style.color = cls === 'ok' ? 'var(--green)' : cls === 'warn' ? 'var(--orange)' : 'var(--dim)'; }
-async function write(c, text) { if (!ch[c]) throw new Error('手表固件太旧'); await ch[c].writeValueWithResponse(enc.encode(text)); }
+/* Android Chrome allows only one GATT operation at a time ("GATT operation already in progress"),
+   so every read / write / notify goes through this queue. */
+let gq = Promise.resolve();
+function gatt(fn) { const p = gq.then(fn); gq = p.catch(() => {}); return p; }
+async function write(c, text) { if (!ch[c]) throw new Error('手表固件太旧'); return gatt(() => ch[c].writeValueWithResponse(enc.encode(text))); }
 
 $('btnConn').onclick = async () => {
   $('btnConn').style.boxShadow = '';
@@ -330,29 +334,45 @@ $('btnConn').onclick = async () => {
     if (saved) { $('code').value = saved; pair(); } else { $('pairBox').style.display = 'block'; setState('请输入手表上的配对码', 'warn'); $('code').focus(); }
   } catch (e) { log('连接失败：' + e.message); setState('未连接'); }
 };
-function onDisc() { setState('已断开 · 数据是上次同步的'); $('btnConn').textContent = '连接'; $('pairBox').style.display = 'none'; }
+function onDisc() { pairing = false; gq = Promise.resolve(); setState('已断开 · 数据是上次同步的'); $('btnConn').textContent = '连接'; $('pairBox').style.display = 'none'; }
 
+let pairing = false;
 async function pair() {
-  try {
-    await write('AUTH', $('code').value.trim());
-    localStorage.setItem('fw_code', $('code').value.trim());
-    $('pairBox').style.display = 'none';
-    setState('已连接', 'ok');
-    await ch.STATUS.startNotifications();
-    ch.STATUS.addEventListener('characteristicvaluechanged', e => showStatus(dec.decode(e.target.value)));
-    await ch.CMD.startNotifications();
-    ch.CMD.addEventListener('characteristicvaluechanged', e => { const m = dec.decode(e.target.value); if (m === 'find') startRing(); else if (m === 'find_stop') stopRing(); });
-    await syncTime();
-    sendLocation();
-    write('CMD', 'url:' + location.origin + location.pathname).catch(() => {});
-    showStatus(dec.decode(await ch.STATUS.readValue()));
-    await syncData();
-  } catch (e) {
+  if (pairing || !(dev && dev.gatt.connected)) return;
+  const code = $('code').value.trim();
+  if (!/^\d{4}$/.test(code)) { $('pairBox').style.display = 'block'; setState('请输入 4 位配对码', 'warn'); return; }
+  pairing = true;
+  /* only the AUTH write decides whether pairing worked */
+  try { await write('AUTH', code); }
+  catch (e) {
+    pairing = false;
+    log('配对失败：' + e.message);
+    if (!dev.gatt.connected) { setState('手表蓝牙断开了，再点一次"连接"', 'warn'); return; }
     localStorage.removeItem('fw_code');
     $('pairBox').style.display = 'block';
-    setState('配对码不对，或手表蓝牙没开', 'warn');
-    log('配对失败：' + e.message);
+    setState('配对码不对，再看一下手表', 'warn');
+    return;
   }
+  localStorage.setItem('fw_code', code);
+  $('pairBox').style.display = 'none';
+  setState('已配对', 'ok');
+  log('配对成功');
+  /* everything after this is best effort: a failure is logged but we stay paired */
+  const step = async (name, fn) => { try { await fn(); } catch (e) { log(name + '失败：' + e.message); } };
+  await step('状态通知', async () => {
+    ch.STATUS.oncharacteristicvaluechanged = e => showStatus(dec.decode(e.target.value));
+    await gatt(() => ch.STATUS.startNotifications());
+  });
+  await step('命令通知', async () => {
+    ch.CMD.oncharacteristicvaluechanged = e => { const m = dec.decode(e.target.value); if (m === 'find') startRing(); else if (m === 'find_stop') stopRing(); };
+    await gatt(() => ch.CMD.startNotifications());
+  });
+  await step('对时', syncTime);
+  await step('读取状态', async () => showStatus(dec.decode(await gatt(() => ch.STATUS.readValue()))));
+  await step('传网址', () => write('CMD', 'url:' + location.origin + location.pathname));
+  await step('同步数据', syncData);
+  sendLocation();
+  pairing = false;
 }
 $('btnPair').onclick = pair;
 $('code').addEventListener('input', () => { if ($('code').value.length === 4) pair(); });
@@ -362,13 +382,13 @@ async function syncData() {
   if (!ch.DATA) { log('手表固件不支持同步'); return; }
   rx = '';
   setState('同步数据中…', 'ok');
-  await ch.DATA.startNotifications();
+  await gatt(() => ch.DATA.startNotifications());
   ch.DATA.oncharacteristicvaluechanged = e => {
     rx += dec.decode(e.target.value);
     let i;
     while ((i = rx.indexOf('\n')) >= 0) {
       const line = rx.slice(0, i); rx = rx.slice(i + 1);
-      if (line === 'END') { db.last = Date.now(); saveDb(); render(); setState('已连接 · 已同步', 'ok'); log('同步完成'); continue; }
+      if (line === 'END') { db.last = Date.now(); saveDb(); render(); setState('已配对 · 已同步', 'ok'); log('同步完成'); continue; }
       try {
         const o = JSON.parse(line);
         if (o.t === 'info') db.info = o;
