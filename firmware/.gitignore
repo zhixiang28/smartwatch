@@ -1,0 +1,5 @@
+build/
+sdkconfig
+sdkconfig.old
+tools/node_modules/
+tools/fonts/

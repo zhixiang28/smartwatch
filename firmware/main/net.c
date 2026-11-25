@@ -1,0 +1,405 @@
+#include <string.h>
+#include <stdlib.h>
+#include <sys/time.h>
+#include "esp_log.h"
+#include "esp_wifi.h"
+#include "esp_event.h"
+#include "esp_netif.h"
+#include "esp_netif_sntp.h"
+#include "esp_sntp.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "app.h"
+
+static const char *TAG = "net";
+static bool s_time_valid;
+static bool s_wifi_up;
+static bool s_wifi_started;
+static bool s_wifi_enabled = true;
+static volatile bool s_ntp_done;
+static char s_err[64];
+const char *net_last_error(void) { return s_err; }
+
+void net_apply_tz(void)
+{
+    int m = g_set.tz_min;
+    char tz[24];
+    char sign = m >= 0 ? '-' : '+';     /* POSIX TZ uses the inverted sign */
+    m = abs(m);
+    snprintf(tz, sizeof(tz), "UTC%c%d:%02d", sign, m / 60, m % 60);
+    setenv("TZ", tz, 1);
+    tzset();
+}
+
+bool net_time_valid(void) { return s_time_valid; }
+bool net_wifi_connected(void) { return s_wifi_up; }
+const char *net_wifi_ssid(void) { return g_set.ssid; }
+
+static void status_async(void *arg) { ui_status_changed(); }
+static void notify_ui(void)
+{
+    if (ui_lock(200)) { lv_async_call(status_async, NULL); ui_unlock(); }
+    ble_notify_status();
+}
+
+void net_set_time(int64_t epoch, int16_t tz_min, bool from_phone)
+{
+    struct timeval tv = { .tv_sec = (time_t)epoch, .tv_usec = 0 };
+    settimeofday(&tv, NULL);
+    if (from_phone) g_set.tz_min = tz_min;
+    net_apply_tz();
+    hw_rtc_write((time_t)epoch);
+    s_time_valid = true;
+    ESP_LOGI(TAG, "time set (%s)", from_phone ? "phone" : "ntp/rtc");
+    notify_ui();
+}
+
+static void sntp_cb(struct timeval *tv)
+{
+    s_ntp_done = true;
+    net_set_time(tv->tv_sec, g_set.tz_min, false);
+}
+
+/* ---------------- WiFi: remembers up to 6 networks, joins the strongest known one ---------------- */
+#include "nvs.h"
+#include "esp_timer.h"
+#include "freertos/event_groups.h"
+#define MAX_NETS 6
+typedef struct { char ssid[33]; char pass[65]; } net_t;
+static net_t s_nets[MAX_NETS];
+static int s_nnets;
+static EventGroupHandle_t s_ev;
+static TaskHandle_t s_mgr;
+static volatile int s_users;            /* jobs that need WiFi right now */
+static esp_timer_handle_t s_off_timer;
+static volatile bool s_radio_on;
+#define EV_GOT_IP BIT0
+#define EV_DISC   BIT1
+
+static void nets_save(void)
+{
+    nvs_handle_t h;
+    if (nvs_open("wifi", NVS_READWRITE, &h) != ESP_OK) return;
+    nvs_set_blob(h, "nets", s_nets, sizeof(net_t) * s_nnets);
+    nvs_commit(h);
+    nvs_close(h);
+}
+
+static void nets_load(void)
+{
+    nvs_handle_t h;
+    s_nnets = 0;
+    if (nvs_open("wifi", NVS_READONLY, &h) == ESP_OK) {
+        size_t len = sizeof(s_nets);
+        if (nvs_get_blob(h, "nets", s_nets, &len) == ESP_OK) s_nnets = len / sizeof(net_t);
+        nvs_close(h);
+    }
+    if (s_nnets == 0 && g_set.ssid[0]) {           /* migrate the single network from v0.1-v0.5 */
+        strncpy(s_nets[0].ssid, g_set.ssid, 32);
+        strncpy(s_nets[0].pass, g_set.pass, 64);
+        s_nnets = 1;
+        nets_save();
+    }
+}
+
+void net_wifi_add(const char *ssid, const char *pass)
+{
+    if (!ssid[0]) return;
+    int i;
+    for (i = 0; i < s_nnets && strcmp(s_nets[i].ssid, ssid); i++) {}
+    if (i == s_nnets) {
+        if (s_nnets == MAX_NETS) { memmove(&s_nets[0], &s_nets[1], sizeof(net_t) * (MAX_NETS - 1)); i = MAX_NETS - 1; }
+        else s_nnets++;
+    }
+    memset(&s_nets[i], 0, sizeof(net_t));
+    strncpy(s_nets[i].ssid, ssid, 32);
+    strncpy(s_nets[i].pass, pass, 64);
+    nets_save();
+    ESP_LOGI(TAG, "saved network '%s' (%d known)", ssid, s_nnets);
+    net_time_sync();                      /* try it right away (also syncs the clock) */
+}
+
+void net_wifi_del(const char *ssid)
+{
+    for (int i = 0; i < s_nnets; i++) {
+        if (strcmp(s_nets[i].ssid, ssid)) continue;
+        memmove(&s_nets[i], &s_nets[i + 1], sizeof(net_t) * (s_nnets - i - 1));
+        s_nnets--;
+        nets_save();
+        if (s_wifi_up && !strcmp(g_set.ssid, ssid)) esp_wifi_disconnect();
+        return;
+    }
+}
+
+int net_wifi_list_json(char *buf, int len)
+{
+    int n = snprintf(buf, len, "[");
+    for (int i = 0; i < s_nnets && n < len - 40; i++)
+        n += snprintf(buf + n, len - n, "%s\"%s\"", i ? "," : "", s_nets[i].ssid);
+    n += snprintf(buf + n, len - n, "]");
+    return n;
+}
+
+int net_wifi_count(void) { return s_nnets; }
+
+static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
+{
+    if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
+        wifi_event_sta_disconnected_t *d = data;
+        int r = d ? d->reason : 0;
+        if (r == 15 || r == 204 || r == 202 || r == 2) snprintf(s_err, sizeof(s_err), "%s 密码可能不对", g_set.ssid);
+        else if (r == 201) snprintf(s_err, sizeof(s_err), "找不到 %s", g_set.ssid);
+        else if (r != 8) snprintf(s_err, sizeof(s_err), "%s 断开（原因 %d）", g_set.ssid, r);
+        ESP_LOGW(TAG, "wifi disconnected, reason %d", r);
+        bool was = s_wifi_up;
+        s_wifi_up = false;
+        xEventGroupSetBits(s_ev, EV_DISC);
+        if (was) notify_ui();
+    } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
+        s_wifi_up = true;
+        s_err[0] = 0;
+        xEventGroupSetBits(s_ev, EV_GOT_IP);
+        ESP_LOGI(TAG, "wifi connected to %s", g_set.ssid);
+        notify_ui();
+    }
+}
+
+static bool try_join(void)
+{
+    if (!s_nnets) return false;
+    wifi_scan_config_t sc = { .show_hidden = true };
+    if (esp_wifi_scan_start(&sc, true) != ESP_OK) return false;
+    uint16_t n = 20;
+    wifi_ap_record_t *ap = calloc(n, sizeof(wifi_ap_record_t));
+    if (!ap) return false;
+    esp_wifi_scan_get_ap_records(&n, ap);
+    int best = -1, rssi = -127;
+    for (int i = 0; i < n; i++)
+        for (int k = 0; k < s_nnets; k++)
+            if (!strcmp((char *)ap[i].ssid, s_nets[k].ssid) && ap[i].rssi > rssi) { rssi = ap[i].rssi; best = k; }
+    free(ap);
+    if (best < 0) { ESP_LOGI(TAG, "no known network in range (%d seen)", n); snprintf(s_err, sizeof(s_err), "附近没有记住的 WiFi（看到 %d 个）", n); return false; }
+    wifi_config_t wc = {0};
+    strncpy((char *)wc.sta.ssid, s_nets[best].ssid, sizeof(wc.sta.ssid));
+    strncpy((char *)wc.sta.password, s_nets[best].pass, sizeof(wc.sta.password));
+    wc.sta.threshold.authmode = s_nets[best].pass[0] ? WIFI_AUTH_WPA_PSK : WIFI_AUTH_OPEN;
+    esp_wifi_set_config(WIFI_IF_STA, &wc);
+    strncpy(g_set.ssid, s_nets[best].ssid, sizeof(g_set.ssid) - 1);
+    xEventGroupClearBits(s_ev, EV_GOT_IP | EV_DISC);
+    ESP_LOGI(TAG, "joining %s (%d dBm)", g_set.ssid, rssi);
+    esp_wifi_connect();
+    EventBits_t b = xEventGroupWaitBits(s_ev, EV_GOT_IP | EV_DISC, pdTRUE, pdFALSE, pdMS_TO_TICKS(15000));
+    if (!(b & (EV_GOT_IP | EV_DISC))) snprintf(s_err, sizeof(s_err), "%s 连接超时（拿不到 IP）", g_set.ssid);
+    return (b & EV_GOT_IP) != 0;
+}
+
+/* WiFi is only switched on while something needs it (time sync, weather, office
+ * light, adding a network) and switched off 20 s after the last job finishes. */
+static void radio_off_cb(void *arg)
+{
+    if (s_users > 0 || !s_radio_on) return;
+    esp_wifi_disconnect();
+    esp_wifi_stop();
+    s_radio_on = false;
+    s_wifi_up = false;
+    ESP_LOGI(TAG, "wifi off (idle)");
+    notify_ui();
+}
+
+void net_wifi_use(bool on)
+{
+    if (on) {
+        s_users++;
+        esp_timer_stop(s_off_timer);
+        if (!s_wifi_enabled || !s_wifi_started) return;
+        if (!s_radio_on) { s_radio_on = true; esp_wifi_start(); ESP_LOGI(TAG, "wifi on"); }
+        net_wifi_reconnect();
+    } else {
+        if (s_users > 0) s_users--;
+        if (s_users == 0) { esp_timer_stop(s_off_timer); esp_timer_start_once(s_off_timer, 20 * 1000000); }
+    }
+}
+
+bool net_wait_connected(int ms)
+{
+    if (s_wifi_up) return true;
+    if (!s_nnets || !s_wifi_enabled) return false;
+    EventBits_t b = xEventGroupWaitBits(s_ev, EV_GOT_IP, pdFALSE, pdFALSE, pdMS_TO_TICKS(ms));
+    return (b & EV_GOT_IP) != 0;
+}
+
+static void mgr_task(void *arg)
+{
+    int fails = 0;
+    for (;;) {
+        if (s_radio_on && s_wifi_enabled && !s_wifi_up && s_nnets && s_users > 0) {
+            if (try_join()) fails = 0;
+            else if (++fails >= 3) { fails = 0; ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(30000)); continue; }
+            continue;
+        }
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(5000));
+    }
+}
+
+/* time sync job: every 6 h (or at boot), WiFi on just long enough for NTP */
+static void ntp_job(void *arg)
+{
+    net_wifi_use(true);
+    s_ntp_done = false;
+    if (net_wait_connected(25000)) {
+        esp_sntp_restart();
+        for (int i = 0; i < 40 && !s_ntp_done; i++) vTaskDelay(pdMS_TO_TICKS(250));
+    }
+    net_wifi_use(false);
+    vTaskDelete(NULL);
+}
+
+void net_time_sync(void)
+{
+    if (s_nnets && s_wifi_enabled) xTaskCreate(ntp_job, "ntp", 3072, NULL, 3, NULL);
+}
+
+void net_wifi_reconnect(void)
+{
+    if (s_mgr) xTaskNotifyGive(s_mgr);
+}
+
+void net_wifi_enable(bool on)
+{
+    if (on == s_wifi_enabled) return;
+    s_wifi_enabled = on;
+    if (!on && s_radio_on) { esp_wifi_disconnect(); esp_wifi_stop(); s_radio_on = false; s_wifi_up = false; }
+    if (on && s_users > 0) { s_users--; net_wifi_use(true); }
+}
+
+void net_init(void)
+{
+    net_apply_tz();
+    time_t t;
+    if (hw_rtc_read(&t)) {
+        struct timeval tv = { .tv_sec = t };
+        settimeofday(&tv, NULL);
+        s_time_valid = true;
+        ESP_LOGI(TAG, "time restored from RTC");
+    }
+    s_ev = xEventGroupCreate();
+    nets_load();
+
+    esp_netif_init();
+    esp_event_loop_create_default();
+    esp_netif_create_default_wifi_sta();
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    if (esp_wifi_init(&cfg) != ESP_OK) return;
+    esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, on_event, NULL);
+    esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, on_event, NULL);
+    esp_wifi_set_mode(WIFI_MODE_STA);
+    esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
+
+    esp_sntp_config_t sc = ESP_NETIF_SNTP_DEFAULT_CONFIG("pool.ntp.org");
+    sc.start = false;
+    sc.sync_cb = sntp_cb;
+    esp_netif_sntp_init(&sc);
+    esp_netif_sntp_start();
+
+    esp_timer_create_args_t ta = { .callback = radio_off_cb, .name = "wifioff" };
+    esp_timer_create(&ta, &s_off_timer);
+    s_wifi_started = true;
+    if (g_set.power_save) s_wifi_enabled = false;
+    xTaskCreate(mgr_task, "wifi_mgr", 4096, NULL, 3, &s_mgr);
+    net_time_sync();
+}
+
+/* ---------------- weather (Open-Meteo, no key needed) ---------------- */
+#include "esp_http_client.h"
+#include "cJSON.h"
+weather_t g_weather;
+static volatile bool s_wx_busy;
+static int64_t s_wx_phone_us;
+
+const char *weather_text(int c)
+{
+    if (c == 0) return "晴";
+    if (c <= 2) return "少云";
+    if (c == 3) return "阴";
+    if (c == 45 || c == 48) return "雾";
+    if (c >= 51 && c <= 57) return "毛毛雨";
+    if (c >= 61 && c <= 67) return "雨";
+    if (c >= 71 && c <= 77) return "雪";
+    if (c >= 80 && c <= 82) return "阵雨";
+    if (c >= 95) return "雷雨";
+    return "多云";
+}
+
+static void wx_task(void *arg)
+{
+    net_wifi_use(true);
+    if (!net_wait_connected(25000)) {
+        ESP_LOGW(TAG, "weather: no wifi");
+        net_wifi_use(false);
+        s_wx_busy = false;
+        notify_ui();
+        vTaskDelete(NULL);
+        return;
+    }
+    char url[256];
+    snprintf(url, sizeof(url),
+             "http://api.open-meteo.com/v1/forecast?latitude=%.3f&longitude=%.3f"
+             "&current=temperature_2m,relative_humidity_2m,weather_code&daily=temperature_2m_max,temperature_2m_min"
+             "&timezone=auto&forecast_days=1", g_set.lat, g_set.lon);
+    char *buf = calloc(1, 4096);
+    esp_http_client_config_t cfg = { .url = url, .timeout_ms = 8000 };
+    esp_http_client_handle_t c = esp_http_client_init(&cfg);
+    int len = 0;
+    if (buf && c && esp_http_client_open(c, 0) == ESP_OK) {
+        esp_http_client_fetch_headers(c);
+        int r;
+        while ((r = esp_http_client_read(c, buf + len, 4095 - len)) > 0) len += r;
+    }
+    if (c) { esp_http_client_close(c); esp_http_client_cleanup(c); }
+    if (len > 0) {
+        cJSON *j = cJSON_Parse(buf);
+        cJSON *cur = j ? cJSON_GetObjectItem(j, "current") : NULL;
+        cJSON *day = j ? cJSON_GetObjectItem(j, "daily") : NULL;
+        if (cur) {
+            weather_t w = {0};
+            w.temp = cJSON_GetObjectItem(cur, "temperature_2m") ? cJSON_GetObjectItem(cur, "temperature_2m")->valuedouble : 0;
+            w.hum = cJSON_GetObjectItem(cur, "relative_humidity_2m") ? cJSON_GetObjectItem(cur, "relative_humidity_2m")->valueint : 0;
+            w.code = cJSON_GetObjectItem(cur, "weather_code") ? cJSON_GetObjectItem(cur, "weather_code")->valueint : 0;
+            if (day) {
+                cJSON *mx = cJSON_GetObjectItem(day, "temperature_2m_max"), *mn = cJSON_GetObjectItem(day, "temperature_2m_min");
+                if (mx && cJSON_GetArraySize(mx)) w.tmax = cJSON_GetArrayItem(mx, 0)->valuedouble;
+                if (mn && cJSON_GetArraySize(mn)) w.tmin = cJSON_GetArrayItem(mn, 0)->valuedouble;
+            }
+            time_t now = time(NULL); struct tm tm; localtime_r(&now, &tm);
+            snprintf(w.upd, sizeof(w.upd), "%02d:%02d", tm.tm_hour, tm.tm_min);
+            w.ok = true;
+            g_weather = w;
+            ESP_LOGI(TAG, "weather %.1f C code %d", w.temp, w.code);
+        }
+        cJSON_Delete(j);
+    } else ESP_LOGW(TAG, "weather fetch failed");
+    free(buf);
+    net_wifi_use(false);
+    notify_ui();
+    s_wx_busy = false;
+    vTaskDelete(NULL);
+}
+
+/* weather pushed by the phone over Bluetooth: no WiFi needed on the watch */
+void net_weather_from_phone(float t, int code, float tmax, float tmin, int hum)
+{
+    weather_t w = { .ok = true, .temp = t, .code = code, .tmax = tmax, .tmin = tmin, .hum = hum };
+    time_t now = time(NULL); struct tm tm; localtime_r(&now, &tm);
+    snprintf(w.upd, sizeof(w.upd), "%02d:%02d", tm.tm_hour, tm.tm_min);
+    g_weather = w;
+    s_wx_phone_us = esp_timer_get_time();
+    notify_ui();
+}
+
+void net_weather_refresh(void)
+{
+    if (s_wx_phone_us && esp_timer_get_time() - s_wx_phone_us < 50LL * 60 * 1000000) return;   /* phone gave us fresh data */
+    if (!s_nnets || !s_wifi_enabled || s_wx_busy) return;
+    s_wx_busy = true;
+    if (xTaskCreate(wx_task, "wx", 6144, NULL, 3, NULL) != pdPASS) s_wx_busy = false;
+}
