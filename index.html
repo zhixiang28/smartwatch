@@ -165,11 +165,16 @@
       <div class="it"><label class="k" for="rs">久坐提醒（1 小时没走动）</label><input type="checkbox" id="rs" style="flex:none;width:22px;height:22px"></div>
       <div class="it"><label class="k" for="rw">喝水提醒（每 2 小时）</label><input type="checkbox" id="rw" style="flex:none;width:22px;height:22px"></div>
     </div>
-    <div class="hd">办公室灯</div>
-    <div class="card" style="padding:4px 16px">
-      <div class="it"><label for="lkey" class="k">灯光钥匙</label><input id="lkey" type="password" placeholder="设备钥匙" autocomplete="off"><button id="btnKey" class="sec" style="height:36px">保存</button></div>
+    <div class="hd">办公室灯（用 mr 账号）</div>
+    <div class="card" style="padding:4px 16px" id="mrIn" hidden>
+      <div class="it"><span class="k">已登入</span><span class="v" id="mrWho">--</span><button id="btnMrOut" class="del">登出</button></div>
     </div>
-    <p class="note" id="lkNote">在灯光系统里给手表新增一个设备，把钥匙贴在这里。</p>
+    <div class="card" style="padding:4px 16px" id="mrForm">
+      <div class="it"><label for="mrEmail" class="k">Email</label><input id="mrEmail" type="email" inputmode="email" placeholder="mr 账号的 email" autocomplete="username"></div>
+      <div class="it"><label for="mrPin" class="k">PIN</label><input id="mrPin" type="password" inputmode="numeric" placeholder="mr 的 PIN" autocomplete="current-password"></div>
+      <div class="it" style="justify-content:flex-end"><button id="btnMrIn" class="sec">登入并存到手表</button></div>
+    </div>
+    <p class="note" id="mrNote">手机先向 mr 确认 email 和 PIN，对了才存到手表。手表开灯时用这个账号。</p>
     <div class="hd">其他</div>
     <div class="card" style="padding:4px 16px">
       <div class="it"><label for="goal" class="k">每日步数目标</label><input id="goal" inputmode="numeric" value="8000" style="max-width:90px"><button id="btnGoal" class="sec" style="height:36px">设定</button></div>
@@ -511,7 +516,7 @@ function showStatus(txt) {
   $('sBatt').textContent = s.batt >= 0 ? `${s.batt}%${s.chg ? ' · 充电中' : ''}` : '--';
   $('sWifi').innerHTML = s.wifi ? `<span class="chip ok">${esc(s.ssid)}</span>` : (s.nets && s.nets.length ? `<span class="chip">平时关着 · 记住 ${s.nets.length} 个</span>` : '未设定');
   if ('rs' in s) { $('rs').checked = !!s.rs; $('rw').checked = !!s.rw; }
-  if ('lk' in s) $('lkNote').textContent = s.lk ? '手表已经有灯光钥匙。' : '在灯光系统里给手表新增一个设备，把钥匙贴在这里。';
+  if ('la' in s) mrShow(s.la);
   if (s.ver) $('sVer').textContent = s.ver;
   if ('rst' in s) {
     $('sRst').innerHTML = `<span class="chip${BAD_RST.includes(s.rst) ? ' warn' : ''}">${esc(RST[s.rst] || s.rst)}</span>`;
@@ -579,7 +584,48 @@ $('btnGoal').onclick = () => { const g = parseInt($('goal').value); if (g >= 100
 $('btnTime').onclick = () => syncTime().catch(e => log(e.message));
 const sendRemind = () => write('CMD', 'remind:' + ($('rs').checked ? 1 : 0) + ($('rw').checked ? 1 : 0)).then(() => log('提醒已更新')).catch(e => log(e.message));
 $('rs').onchange = sendRemind; $('rw').onchange = sendRemind;
-$('btnKey').onclick = () => { const k = $('lkey').value.trim(); if (k) write('CMD', 'lightkey:' + k).then(() => { $('lkey').value = ''; log('灯光钥匙已保存到手表'); }).catch(e => log(e.message)); };
+/* ---------- office light: sign in with the mr-tracker account ----------
+   The phone checks email + PIN with login_by_email first; only a PIN that works is sent to the
+   watch, which then calls light_set(person, pin). A wrong PIN stored on the watch would lock the
+   account after 5 tries. The publishable key is meant to be public (it is in the firmware too). */
+const MR_URL = 'https://ogxuwchojexznsxvvdhi.supabase.co', MR_KEY = 'sb_publishable_pB5HMEXMjVDQiNcWlenV1A_ETc2qaNP';
+function mrShow(on) {
+  const name = localStorage.getItem('mr_name');
+  $('mrIn').hidden = !on; $('mrForm').hidden = !!on;
+  $('mrWho').textContent = name || '（手表上有账号）';
+  if (!on && name) $('mrNote').textContent = '手表上的 mr 账号已失效（PIN 可能改了），请重新登入。';
+}
+$('btnMrIn').onclick = async () => {
+  const email = $('mrEmail').value.trim(), pin = $('mrPin').value;
+  if (!email) { $('mrEmail').focus(); return; }
+  if (!pin) { $('mrPin').focus(); return; }
+  if (!paired) { $('mrNote').textContent = '先连接手表。'; return; }
+  $('btnMrIn').disabled = true; $('mrNote').textContent = '向 mr 确认中…';
+  try {
+    const r = await fetch(MR_URL + '/rest/v1/rpc/login_by_email', {
+      method: 'POST', headers: { apikey: MR_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ p_email: email, p_pin: pin })
+    });
+    const j = await r.json();
+    if (!r.ok || !j || !j.success) {
+      let m = (j && (j.error || j.message)) || ('登入失败（' + r.status + '）');
+      if (/Incorrect email or PIN/i.test(m)) m = 'email 或 PIN 不对（连续错 5 次账号会被暂停一阵子）';
+      else if (j && j.locked) m = 'PIN 错太多次，账号暂停中：' + m;
+      $('mrNote').textContent = '✗ ' + m; return;
+    }
+    await write('CMD', 'lightacct:' + j.id + '\n' + pin);
+    localStorage.setItem('mr_name', j.name || email);
+    $('mrPin').value = '';
+    $('mrNote').textContent = '✓ 已登入 ' + (j.name || email) + '，手表可以开灯了。';
+    mrShow(true);
+    log('mr 账号已存到手表：' + (j.name || email));
+  } catch (e) { $('mrNote').textContent = '✗ ' + e.message; }
+  finally { $('btnMrIn').disabled = false; }
+};
+$('btnMrOut').onclick = async () => {
+  try { await write('CMD', 'lightout'); localStorage.removeItem('mr_name'); mrShow(false); $('mrNote').textContent = '已登出，手表不能开灯了。'; log('mr 账号已从手表移除'); }
+  catch (e) { log(e.message); }
+};
 $('btnBuzz').onclick = () => write('CMD', 'buzz').catch(e => log(e.message));
 $('btnClear').onclick = () => { if (confirm('清除手机上保存的健康和训练数据？手表上的数据不受影响。')) { localStorage.removeItem(DB_KEY); location.reload(); } };
 
