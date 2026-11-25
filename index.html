@@ -4,7 +4,15 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#000000">
-<title>鱼缸手表 · 设定</title>
+<title>Smart Watch · 设定</title>
+<meta name="application-name" content="Smart Watch">
+<meta name="apple-mobile-web-app-title" content="Smart Watch">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
 <style>
   :root{--bg:#000;--card:#1c1c1e;--line:#2c2c2e;--text:#fff;--dim:#8e8e93;--blue:#0a84ff;--green:#30d158;--orange:#ff9f0a;--red:#ff453a;--teal:#5eead4}
   *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
@@ -41,12 +49,16 @@
 <body>
 <div class="wrap">
   <h1>手表设定</h1>
+  <div id="installBox" class="grp" style="display:none;margin-bottom:14px">
+    <div class="it"><span class="k">把 Smart Watch 安装到手机桌面</span><button id="btnInstall" class="pri">下载</button></div>
+  </div>
+  <p id="iosTip" class="note" style="display:none;margin:0 4px 14px">iPhone：点 Safari 的「分享」→「添加到主屏幕」即可安装。</p>
   <div id="unsup">这个浏览器不支持网页蓝牙。请用 <b>Android 手机的 Chrome</b> 打开（网址需要是 https，例如 GitHub Pages）。</div>
 
   <div class="grp watch">
     <div class="face"><i></i></div>
     <div style="flex:1">
-      <div style="font-weight:600">鱼缸手表</div>
+      <div style="font-weight:600">Smart Watch</div>
       <div id="st" style="font-size:13px;color:var(--dim)">未连接</div>
     </div>
     <button id="btnConn" class="pri">连接手表</button>
@@ -190,6 +202,21 @@ function showStatus(txt) {
   $('sWork').textContent = `${s.workouts} 次 · 累计 ${s.total} kg`;
   if (s.ssid && !$('ssid').value) $('ssid').value = s.ssid;
 }
+
+/* install as app (PWA) */
+if ('serviceWorker' in navigator) window.addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(e => log('离线缓存失败：' + e.message)));
+let installEvt;
+const standalone = matchMedia('(display-mode: standalone)').matches || navigator.standalone;
+window.addEventListener('beforeinstallprompt', e => { e.preventDefault(); installEvt = e; $('installBox').style.display = 'block'; });
+window.addEventListener('appinstalled', () => { $('installBox').style.display = 'none'; log('已安装到桌面'); });
+$('btnInstall').onclick = async () => {
+  if (!installEvt) return;
+  installEvt.prompt();
+  const { outcome } = await installEvt.userChoice;
+  if (outcome === 'accepted') $('installBox').style.display = 'none';
+  installEvt = null;
+};
+if (!standalone && /iphone|ipad|ipod/i.test(navigator.userAgent)) $('iosTip').style.display = 'block';
 
 /* find my phone */
 let findTimer;
