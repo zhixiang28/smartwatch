@@ -65,3 +65,9 @@ CONFIG_ESP_COREDUMP_CHECKSUM_CRC32=y
 CONFIG_ESP_COREDUMP_MAX_TASKS_NUM=64
 # LVGL asserts abort (-> core dump + reboot) instead of spinning forever; see components/fw_lv_assert.h
 CONFIG_LV_ASSERT_HANDLER_INCLUDE="fw_lv_assert.h"
+# TLS crypto in software: the hardware AES/SHA DMA path needs descriptors in internal RAM,
+# which is nearly gone with WiFi + BLE + the display running. Requests went out (small,
+# non-DMA) but decrypting the reply failed ("读取失败（-1）"). A few hundred bytes per tap
+# don't need the accelerator. (RSA/ECC big-number hardware stays on; it doesn't use DMA.)
+CONFIG_MBEDTLS_HARDWARE_AES=n
+CONFIG_MBEDTLS_HARDWARE_SHA=n

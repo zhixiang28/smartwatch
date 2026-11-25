@@ -32,21 +32,37 @@ static int http_call(const char *path, const char *body, char *out, int outlen)
 {
     char url[200];
     snprintf(url, sizeof(url), SB_URL "%s", path);
+    /* 2 KB receive buffer: Supabase / Cloudflare reply headers are long, and a header line that
+     * does not fit the default 512 bytes fails the whole read. */
     esp_http_client_config_t cfg = { .url = url, .timeout_ms = 8000, .crt_bundle_attach = esp_crt_bundle_attach,
-                                     .method = body ? HTTP_METHOD_POST : HTTP_METHOD_GET };
+                                     .method = body ? HTTP_METHOD_POST : HTTP_METHOD_GET,
+                                     .buffer_size = 2048, .buffer_size_tx = 1024 };
+    out[0] = 0;
     esp_http_client_handle_t c = esp_http_client_init(&cfg);
-    if (!c) return -1;
+    if (!c) {
+        snprintf(s_l_detail, sizeof(s_l_detail), "开不了连线（内存不足 %u/%u）",
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL), (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+        return -2;
+    }
     esp_http_client_set_header(c, "apikey", SB_KEY);
     if (body) esp_http_client_set_header(c, "Content-Type", "application/json");
     int len = 0, status = -1;
     esp_err_t oe = esp_http_client_open(c, body ? strlen(body) : 0);
     if (oe != ESP_OK) { snprintf(s_l_detail, sizeof(s_l_detail), "连不上服务器：%s", esp_err_to_name(oe)); ESP_LOGW(TAG, "http open: %s", esp_err_to_name(oe)); }
     if (oe == ESP_OK) {
-        if (body) esp_http_client_write(c, body, strlen(body));
-        esp_http_client_fetch_headers(c);
+        int w = body ? esp_http_client_write(c, body, strlen(body)) : 0;
+        int64_t cl = w < 0 ? ESP_FAIL : esp_http_client_fetch_headers(c);
+        for (int i = 0; i < 3 && cl == -ESP_ERR_HTTP_EAGAIN; i++) cl = esp_http_client_fetch_headers(c);   /* not ready yet: keep waiting */
         status = esp_http_client_get_status_code(c);
-        int r;
-        while ((r = esp_http_client_read(c, out + len, outlen - 1 - len)) > 0) len += r;
+        if (status <= 0) {
+            /* -1 from fetch_headers can also just mean "no Content-Length", so judge by the status line */
+            snprintf(s_l_detail, sizeof(s_l_detail), "读不到回应（%lld，%d，%d）", (long long)cl, w, esp_http_client_get_errno(c));
+            ESP_LOGW(TAG, "http: no status (fetch %lld, write %d, errno %d)", (long long)cl, w, esp_http_client_get_errno(c));
+            status = -1;
+        } else {
+            int r;
+            while (len < outlen - 1 && (r = esp_http_client_read(c, out + len, outlen - 1 - len)) > 0) len += r;
+        }
     }
     out[len] = 0;
     esp_http_client_close(c);

@@ -67,7 +67,7 @@ lv_obj_t *ui_header(lv_obj_t *root, const char *title, uint32_t accent)
     lv_obj_center(ic);
     lv_obj_add_event_cb(b, back_clicked, LV_EVENT_CLICKED, NULL);
     lv_obj_t *t = ui_label(root, &font_cn20, C_TEXT, title);
-    lv_obj_align(t, LV_ALIGN_TOP_MID, 20, 28);
+    lv_obj_align(t, LV_ALIGN_TOP_MID, 0, 28);      /* centred like the subtitles under it; the back button is only the left 78 px */
     return t;
 }
 

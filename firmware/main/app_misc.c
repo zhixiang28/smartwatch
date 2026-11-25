@@ -4,6 +4,7 @@
 #include "esp_timer.h"
 #include "bsp/esp-bsp.h"
 #include "bsp/display.h"
+#include "esp_app_desc.h"
 #include "app.h"
 
 extern void (*g_app_refresh)(void);
@@ -379,7 +380,9 @@ void app_settings(lv_obj_t *root)
     int b = hw_battery_percent();
     if (b >= 0) snprintf(b1, sizeof(b1), "%d%%%s", b, hw_charging() ? " 充电中" : ""); else snprintf(b1, sizeof(b1), "--");
     snprintf(b2, sizeof(b2), "%u 次 · %lu kg", g_set.workouts, (unsigned long)g_set.total_kg);
-    set_row(root, 84, "版本", "鱼缸手表 v0.7.1");
+    char ver[40];
+    snprintf(ver, sizeof(ver), "鱼缸手表 v%s", esp_app_get_description()->version);   /* from PROJECT_VER, not hand-typed */
+    set_row(root, 84, "版本", ver);
     set_row(root, 130, "电量", b1);
     set_row(root, 176, "动作感应", hw_imu_ok() ? "正常" : "未检测到");
     set_row(root, 222, "SD 卡", store_sd_ok() ? "已插入" : "没有");
