@@ -21,8 +21,8 @@ typedef struct {
 #define CAT_SYS  "系统", 0x64748B
 
 static const app_def_t APPS[] = {
-    {"小智", CAT_AI, &img_icon_ai, NULL, "语音 AI 助手。下一版接上小智服务器，用手机设定网页填激活码。"},
-    {"翻译", CAT_AI, &img_icon_tr, NULL, "按住说话，中英互译并朗读。需要联网，下一版加入。"},
+    {"小智", CAT_AI, &img_icon_ai, app_xiaozhi, NULL},
+    {"翻译", CAT_AI, &img_icon_tr, app_translate, NULL},
     {"笔记", CAT_AI, &img_icon_nt, app_notes, NULL},
     {"训练", CAT_FIT, &img_icon_wk, app_workout, NULL},
     {"计步", CAT_FIT, &img_icon_st, app_steps, NULL},

@@ -121,12 +121,12 @@ static int status_json(char *buf, int len)
     json_esc(ssid, sizeof(ssid), g_set.ssid);
     int n = snprintf(buf, len,
         "{\"ver\":\"%s\",\"auth\":%s,\"batt\":%d,\"chg\":%s,\"wifi\":%s,\"ssid\":\"%s\",\"time\":%s,\"tz\":%d,"
-        "\"hunger\":%d,\"dirt\":%d,\"workouts\":%u,\"total\":%lu,\"steps\":%lu,\"nets\":%s,\"rs\":%d,\"rw\":%d,\"lk\":%s,\"la\":%s,\"rst\":\"%s\",\"dump\":%s}",
+        "\"hunger\":%d,\"dirt\":%d,\"workouts\":%u,\"total\":%lu,\"steps\":%lu,\"nets\":%s,\"rs\":%d,\"rw\":%d,\"lk\":%s,\"la\":%s,\"rst\":\"%s\",\"dump\":%s,\"xzs\":%d,\"xzc\":\"%s\"}",
         esp_app_get_description()->version, s_authed ? "true" : "false", hw_battery_percent(), hw_charging() ? "true" : "false",
         net_wifi_connected() ? "true" : "false", ssid, net_time_valid() ? "true" : "false", g_set.tz_min,
         (int)g_set.hunger, (int)g_set.dirt, g_set.workouts, (unsigned long)g_set.total_kg, (unsigned long)g_set.steps, nets, g_set.remind_sit, g_set.remind_water, g_set.light_key[0] ? "true" : "false",
         g_set.light_person[0] && g_set.light_pin[0] ? "true" : "false",
-        diag_reset_reason(), diag_has_dump() ? "true" : "false");
+        diag_reset_reason(), diag_has_dump() ? "true" : "false", xz_state(), xz_code());
     free(nets);
     return n < len ? n : len - 1;
 }
@@ -286,6 +286,11 @@ static int access_cb(uint16_t conn, uint16_t attr, struct ble_gatt_access_ctxt *
                 snprintf(g_set.light_pin, sizeof(g_set.light_pin), "%s", nl + 1);
                 store_save();
             }
+        }
+        else if (!strncmp(buf, "xz_ota:", 7)) {                 /* 小智 server; "" = official. A new server needs new credentials */
+            snprintf(g_set.xz_ota, sizeof(g_set.xz_ota), "%s", buf + 7);
+            g_set.xz_url[0] = 0; g_set.xz_token[0] = 0;
+            store_save();
         }
         else if (!strncmp(buf, "radio_url:", 10)) { snprintf(g_set.radio_url, sizeof(g_set.radio_url), "%s", buf + 10); store_save(); }
         else if (!strcmp(buf, "lightout")) { g_set.light_person[0] = 0; g_set.light_pin[0] = 0; store_save(); }

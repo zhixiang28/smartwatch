@@ -74,3 +74,6 @@ CONFIG_MBEDTLS_HARDWARE_SHA=n
 # faster WiFi: ask the router for the last IP again (DHCP REQUEST) instead of a full discover
 CONFIG_LWIP_DHCP_RESTORE_LAST_IP=y
 CONFIG_BT_NIMBLE_NVS_PERSIST=y
+# 小智: websocket client task stack + structures in PSRAM (internal RAM is the scarce part)
+CONFIG_ESP_WS_CLIENT_TASK_STACK_IN_EXT_RAM=y
+CONFIG_ESP_WS_CLIENT_ALLOC_IN_EXT_RAM=y

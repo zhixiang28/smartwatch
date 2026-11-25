@@ -59,6 +59,11 @@ typedef struct {
     char light_pin[33];
     char radio_url[128];    /* custom station from the phone page ("" = none) */
     uint8_t radio_station;  /* last station played */
+    /* 小智 (xiaozhi.me) voice assistant */
+    char xz_ota[128];       /* OTA / config URL, "" = the official server */
+    char xz_url[128];       /* websocket URL the server gave us */
+    char xz_token[200];
+    char xz_uuid[40];       /* our Client-Id, made once */
 } settings_t;
 
 typedef struct { bool ok; float temp, tmax, tmin; int code, hum; char upd[8]; } weather_t;
@@ -213,6 +218,11 @@ void app_light(lv_obj_t *root);
 void app_game(lv_obj_t *root);
 void app_camera(lv_obj_t *root);
 void app_radio(lv_obj_t *root);
+void app_xiaozhi(lv_obj_t *root);
+void app_translate(lv_obj_t *root);
+int xz_state(void);                /* see xiaozhi.c, for the phone page */
+const char *xz_code(void);         /* pending activation code, "" if none */
+void xz_save_if_needed(void);      /* NVS writes deferred from PSRAM-stack tasks */
 bool radio_playing(void);
 void radio_stop(void);
 void reminders_check(void);
