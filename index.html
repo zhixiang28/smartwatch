@@ -470,8 +470,18 @@ function showStatus(txt) {
 }
 
 $('btnWifi').onclick = async () => {
-  const s = $('ssid').value.trim();
+  let s = $('ssid').value.trim();
   if (!s) { $('ssid').focus(); return; }
+  /* the watch (ESP32-S3) only has 2.4 GHz: a "..._5GHz" / "...-5G" network is invisible to it */
+  if (/(^|[\s_\-.])5\s*g(hz)?\b/i.test(s)) {
+    const alt = s.replace(/[\s_\-.]*5\s*g(hz)?\b/i, '').trim();
+    const msg = `「${s}」看起来是 5 GHz 的 WiFi，手表只能连 2.4 GHz，连不上。\n` +
+      (alt ? `同一台路由器通常还有一个 2.4 GHz 的名字，例如「${alt}」，密码一般一样。\n\n按「确定」改成加入「${alt}」；按「取消」照原样加入。`
+           : '请改用路由器的 2.4 GHz 名字。\n\n按「确定」照原样加入；按「取消」不加。');
+    const ok = confirm(msg);
+    if (alt) { if (ok) { s = alt; $('ssid').value = alt; } }
+    else if (!ok) return;
+  }
   try { await write('WIFI', s + '\n' + $('pass').value); log('已加入，手表会自动连接'); $('ssid').value = ''; $('pass').value = ''; } catch (e) { log('失败：' + e.message); }
 };
 $('btnGoal').onclick = () => { const g = parseInt($('goal').value); if (g >= 1000) write('CMD', 'goal:' + g).then(() => { if (db.info) db.info.goal = g; saveDb(); render(); log('目标已设定'); }).catch(e => log(e.message)); };
