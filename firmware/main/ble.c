@@ -12,6 +12,7 @@
 #include "host/util/util.h"
 #include "services/gap/ble_svc_gap.h"
 #include "services/gatt/ble_svc_gatt.h"
+#include "esp_app_desc.h"
 #include "app.h"
 
 static const char *TAG = "ble";
@@ -54,11 +55,12 @@ static int status_json(char *buf, int len)
     net_wifi_list_json(nets, 1300);
     json_esc(ssid, sizeof(ssid), g_set.ssid);
     int n = snprintf(buf, len,
-        "{\"ver\":\"0.7\",\"auth\":%s,\"batt\":%d,\"chg\":%s,\"wifi\":%s,\"ssid\":\"%s\",\"time\":%s,\"tz\":%d,"
-        "\"hunger\":%d,\"dirt\":%d,\"workouts\":%u,\"total\":%lu,\"steps\":%lu,\"nets\":%s,\"rs\":%d,\"rw\":%d,\"lk\":%s}",
-        s_authed ? "true" : "false", hw_battery_percent(), hw_charging() ? "true" : "false",
+        "{\"ver\":\"%s\",\"auth\":%s,\"batt\":%d,\"chg\":%s,\"wifi\":%s,\"ssid\":\"%s\",\"time\":%s,\"tz\":%d,"
+        "\"hunger\":%d,\"dirt\":%d,\"workouts\":%u,\"total\":%lu,\"steps\":%lu,\"nets\":%s,\"rs\":%d,\"rw\":%d,\"lk\":%s,\"rst\":\"%s\",\"dump\":%s}",
+        esp_app_get_description()->version, s_authed ? "true" : "false", hw_battery_percent(), hw_charging() ? "true" : "false",
         net_wifi_connected() ? "true" : "false", ssid, net_time_valid() ? "true" : "false", g_set.tz_min,
-        (int)g_set.hunger, (int)g_set.dirt, g_set.workouts, (unsigned long)g_set.total_kg, (unsigned long)g_set.steps, nets, g_set.remind_sit, g_set.remind_water, g_set.light_key[0] ? "true" : "false");
+        (int)g_set.hunger, (int)g_set.dirt, g_set.workouts, (unsigned long)g_set.total_kg, (unsigned long)g_set.steps, nets, g_set.remind_sit, g_set.remind_water, g_set.light_key[0] ? "true" : "false",
+        diag_reset_reason(), diag_has_dump() ? "true" : "false");
     free(nets);
     return n < len ? n : len - 1;
 }
@@ -127,6 +129,14 @@ static bool emit_line(const char *line)
     return true;
 }
 
+static void dump_task(void *arg)
+{
+    bool ok = diag_export(emit_line);
+    ESP_LOGI(TAG, "dump export %s", ok ? "done" : "aborted");
+    s_syncing = false;
+    vTaskDelete(NULL);
+}
+
 static void sync_task(void *arg)
 {
     health_save();
@@ -190,6 +200,11 @@ static int access_cb(uint16_t conn, uint16_t attr, struct ble_gatt_access_ctxt *
             s_syncing = true;
             if (xTaskCreate(sync_task, "sync", 4096, NULL, 3, NULL) != pdPASS) s_syncing = false;
         }
+        else if (!strcmp(buf, "dump") && !s_syncing) {          /* crash report -> phone, over DATA */
+            s_syncing = true;
+            if (xTaskCreate(dump_task, "dump", 4096, NULL, 3, NULL) != pdPASS) s_syncing = false;
+        }
+        else if (!strcmp(buf, "dump_clear")) diag_clear();
         else if (!strncmp(buf, "wifi_del:", 9)) { net_wifi_del(buf + 9); ui_kick(); }
         else if (!strncmp(buf, "wx:", 3)) {
             float t, mx, mn; int code, hum;

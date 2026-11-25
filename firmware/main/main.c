@@ -2,8 +2,10 @@
 #include "freertos/task.h"
 #include "esp_log.h"
 #include "esp_heap_caps.h"
+#include <stdio.h>
 #include "bsp/esp-bsp.h"
 #include "bsp/display.h"
+#include "esp_app_desc.h"
 #include "app.h"
 
 static const char *TAG = "fishwatch";
@@ -24,8 +26,9 @@ static void stable_task(void *arg)
 
 void app_main(void)
 {
-    ESP_LOGI(TAG, "FishWatch v0.7 starting");
+    ESP_LOGI(TAG, "FishWatch v%s starting", esp_app_get_description()->version);
     store_init();
+    diag_init();
     int crashes = store_boot_begin();
     g_safe_mode = crashes >= 2;
     ESP_LOGI(TAG, "previous failed boots: %d%s", crashes, g_safe_mode ? " -> SAFE MODE" : "");
@@ -56,7 +59,12 @@ void app_main(void)
         ui_unlock();
     }
     ESP_LOGI(TAG, "ui ok");
-    if (g_safe_mode) ui_toast("安全模式：已关闭声音");
+    if (g_safe_mode) { if (ui_lock(1000)) { ui_toast("安全模式：已关闭声音"); ui_unlock(); } }   /* LVGL runs on its own task: lock */
+    else if (diag_abnormal()) {
+        char t[80];
+        snprintf(t, sizeof(t), "上次重启不正常（%s）%s", diag_reset_reason(), diag_has_dump() ? "，连手机看原因" : "");
+        if (ui_lock(1000)) { ui_toast(t); ui_unlock(); }
+    }
     hw_haptic(40);
     xTaskCreate(stable_task, "stable", 4096, NULL, 2, NULL);
 }

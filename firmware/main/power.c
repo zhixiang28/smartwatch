@@ -2,6 +2,7 @@
 #include "esp_log.h"
 #include "esp_pm.h"
 #include "esp_timer.h"
+#include "esp_task_wdt.h"
 #include "bsp/esp-bsp.h"
 #include "bsp/display.h"
 #include "app.h"
@@ -71,6 +72,11 @@ void ui_raise_wake(void) { power_wake(); }
 
 static void tick(lv_timer_t *t)
 {
+    /* The UI task is watched too: if it stops running timers for 10 s (stuck on a lock,
+     * spinning) the task watchdog reboots the watch and leaves a core dump. */
+    static bool wdt_added;
+    if (!wdt_added) wdt_added = esp_task_wdt_add(NULL) == ESP_OK;
+    else esp_task_wdt_reset();
     /* background jobs that run even with the screen off */
     uint32_t n = hw_steps();
     if (net_time_valid()) {

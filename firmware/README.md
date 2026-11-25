@@ -1,4 +1,4 @@
-# FishWatch 养鱼手表 — firmware (v0.7.1)
+# FishWatch 养鱼手表 — firmware (v0.7.7)
 
 ESP-IDF firmware for the **Waveshare ESP32-S3-Touch-AMOLED-2.06** watch.
 The phone companion page is the `index.html` at the repo root (served by GitHub Pages).
@@ -52,7 +52,21 @@ Service `f15a000X-6c2b-4b9a-9d3e-2a1c5e7b8d00`, X =
 2 AUTH (pairing code), 3 TIME, 4 WIFI, 5 STATUS (notify JSON), 6 CMD (notify),
 7 LOC, 8 DATA (notify JSON lines, ends with `END`).
 CMD strings: `find_stop`, `buzz`, `sync`, `wifi_del:<ssid>`, `goal:<n>`, `url:<page>`,
-`lightkey:<key>`, `remind:XY`, `wx:t,code,max,min,hum`.
+`lightkey:<key>`, `remind:XY`, `wx:t,code,max,min,hum`, `dump` (stream the crash dump over DATA),
+`dump_clear`.
+Watch → phone on CMD: `find`, `find_stop`, `wifi_ok:<ssid>`, `wifi_fail:<ssid>\n<reason>`.
+WIFI writes are tried first and only saved if the watch gets an IP (since 0.7.6).
+STATUS JSON also carries `rst` (last reset reason) and `dump` (a core dump is stored) since 0.7.7.
+
+## Crash diagnostics (0.7.7+)
+A panic, an LVGL assert (`components/fw_lv_assert.h` → abort) or the task watchdog (the UI task
+is watched too, fed by the 500 ms power tick) reboots the watch and writes an ELF core dump to
+the `coredump` partition. On the next boot the watch toasts the reason; the phone page shows it
+under 手表状态 and can download the dump. Decode it with the matching ELF from `releases/`:
+```
+xz -dk releases/fishwatch_v0.7.7.elf.xz
+python -m esp_coredump info_corefile -t raw -c fishwatch-coredump-....bin releases/fishwatch_v0.7.7.elf
+```
 Chrome Web Bluetooth allows one GATT operation at a time — the phone page queues them.
 
 ## Office light

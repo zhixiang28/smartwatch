@@ -130,6 +130,14 @@ const char *net_last_error(void);
 void net_wifi_add(const char *ssid, const char *pass);
 void net_wifi_del(const char *ssid);
 int net_wifi_list_json(char *buf, int len);
+/* ---------- crash diagnostics (diag.c) ---------- */
+void diag_init(void);
+const char *diag_reset_reason(void);   /* "poweron", "panic", "task_wdt", "brownout", ... */
+bool diag_abnormal(void);
+bool diag_has_dump(void);
+const char *diag_summary(void);
+void diag_clear(void);
+bool diag_export(bool (*emit)(const char *line));
 int json_esc(char *out, int len, const char *in);
 typedef void (*net_test_cb_t)(bool ok, const char *ssid, const char *why);
 /* Try a network; the callback (on the WiFi task) says whether it connected. It is only

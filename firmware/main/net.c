@@ -327,7 +327,8 @@ static void mgr_task(void *arg)
         }
         if (s_radio_on && s_wifi_enabled && !s_wifi_up && s_nnets && s_users > 0) {
             if (try_join()) fails = 0;
-            else if (++fails >= 3) { fails = 0; ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(30000)); continue; }
+            else if (++fails >= 3) { fails = 0; ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(30000)); }
+            else ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1000));      /* a failed scan returns at once: don't spin */
             continue;
         }
         ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(5000));
@@ -468,6 +469,7 @@ void net_init(void)
     if (esp_wifi_init(&cfg) != ESP_OK) return;
     esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, on_event, NULL);
     esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, on_event, NULL);
+    esp_wifi_set_storage(WIFI_STORAGE_RAM);   /* we keep our own list; don't rewrite flash on every connect attempt */
     esp_wifi_set_mode(WIFI_MODE_STA);
     esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
 
