@@ -679,7 +679,8 @@ static void font_clean(char *s, const lv_font_t *f)
         else break;
     }
 }
-static lv_obj_t *s_ui_st, *s_ui_user, *s_ui_bot, *s_ui_btn;
+static lv_obj_t *s_ui_st, *s_ui_user, *s_ui_bot, *s_ui_btn, *s_ui_qr;
+static bool s_qr_forced;                     /* the user tapped the link: show the QR until tapped again */
 static lv_timer_t *s_ui_tm;
 
 static void ui_paint(lv_timer_t *t)
@@ -688,7 +689,7 @@ static void ui_paint(lv_timer_t *t)
     if (!s_ui_st) return;
     static const char *ST[] = {"已关闭", "正在打开 WiFi…", "连接小智服务器…", "", "建立对话…", "按住下面说话", "在听…放开就送出", "想一想…", "小智在说话（按住可以打断）", ""};
     char line[120];
-    if (s_st == XZ_ACTIVATE) snprintf(line, sizeof(line), "激活码 %s\n到 xiaozhi.me 添加设备，手机设定网页也看得到", s_code);
+    if (s_st == XZ_ACTIVATE) snprintf(line, sizeof(line), "激活码 %s\n扫码打开 xiaozhi.me → 添加设备 → 输入激活码", s_code);
     else if (s_st == XZ_ERROR) snprintf(line, sizeof(line), "%s\n（点按钮重试）", s_err);
     else snprintf(line, sizeof(line), "%s", ST[s_st]);
     lv_label_set_text(s_ui_st, line);
@@ -697,6 +698,10 @@ static void ui_paint(lv_timer_t *t)
     memcpy(u, s_user, sizeof(u));
     memcpy(b, s_bot, sizeof(b));
     taskEXIT_CRITICAL(&s_txt_mux);
+    /* QR for xiaozhi.me: always while waiting for activation, or when the link was tapped */
+    bool qr = s_qr_forced || s_st == XZ_ACTIVATE;
+    if (qr) { lv_obj_remove_flag(s_ui_qr, LV_OBJ_FLAG_HIDDEN); lv_obj_add_flag(s_ui_bot, LV_OBJ_FLAG_HIDDEN); lv_obj_add_flag(s_ui_user, LV_OBJ_FLAG_HIDDEN); }
+    else { lv_obj_add_flag(s_ui_qr, LV_OBJ_FLAG_HIDDEN); lv_obj_remove_flag(s_ui_bot, LV_OBJ_FLAG_HIDDEN); lv_obj_remove_flag(s_ui_user, LV_OBJ_FLAG_HIDDEN); }
     font_clean(u, &font_cn16);
     font_clean(b, &font_cn20);
     lv_label_set_text(s_ui_user, u[0] ? u : "");
@@ -713,8 +718,11 @@ static void btn_cb(lv_event_t *e)
     ui_paint(NULL);
 }
 
+static void qr_tap(lv_event_t *e) { s_qr_forced = !s_qr_forced; ui_paint(NULL); }
+
 static void ui_close(void)
 {
+    s_qr_forced = false;
     if (s_ui_tm) { lv_timer_delete(s_ui_tm); s_ui_tm = NULL; }
     s_ui_st = NULL;
     xz_shut();
@@ -750,8 +758,21 @@ static void build(lv_obj_t *root, const char *title, int mode, uint32_t tint, co
     lv_obj_add_event_cb(s_ui_btn, btn_cb, LV_EVENT_PRESS_LOST, NULL);
     lv_obj_t *l = ui_label(s_ui_btn, &font_cn20, 0x0B1F1C, "按住说话");
     lv_obj_center(l);
-    lv_obj_t *n = ui_label(root, &font_cn16, 0x6B7280, hint);
+    s_ui_qr = lv_qrcode_create(root);
+    lv_qrcode_set_size(s_ui_qr, 168);
+    lv_qrcode_set_dark_color(s_ui_qr, lv_color_black());
+    lv_qrcode_set_light_color(s_ui_qr, lv_color_white());
+    lv_qrcode_update(s_ui_qr, "https://xiaozhi.me", strlen("https://xiaozhi.me"));
+    lv_obj_set_style_border_color(s_ui_qr, lv_color_white(), 0);
+    lv_obj_set_style_border_width(s_ui_qr, 8, 0);          /* quiet zone so phones read it */
+    lv_obj_align(s_ui_qr, LV_ALIGN_TOP_MID, 0, 138);
+    lv_obj_add_flag(s_ui_qr, LV_OBJ_FLAG_HIDDEN | LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(s_ui_qr, qr_tap, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *n = ui_label(root, &font_cn16, 0x5EEAD4, hint);
     lv_obj_align(n, LV_ALIGN_BOTTOM_MID, 0, -30);
+    lv_obj_add_flag(n, LV_OBJ_FLAG_CLICKABLE);              /* tap: show / hide the xiaozhi.me QR */
+    lv_obj_set_ext_click_area(n, 16);
+    lv_obj_add_event_cb(n, qr_tap, LV_EVENT_CLICKED, NULL);
     ui_paint(NULL);
     s_ui_tm = lv_timer_create(ui_paint, 250, NULL);
     power_keep_awake(true);
@@ -759,5 +780,5 @@ static void build(lv_obj_t *root, const char *title, int mode, uint32_t tint, co
     xz_open(mode);
 }
 
-void app_xiaozhi(lv_obj_t *root) { build(root, "小智", 0, 0x14B8A6, "要联网；第一次要在 xiaozhi.me 激活"); }
+void app_xiaozhi(lv_obj_t *root) { build(root, "小智", 0, 0x14B8A6, "点这里显示 xiaozhi.me 网址二维码"); }
 void app_translate(lv_obj_t *root) { build(root, "翻译", 1, 0x14B8A6, "说中文翻成英文，说英文翻成中文"); }
