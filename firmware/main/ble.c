@@ -44,24 +44,36 @@ void ble_new_code(void) { s_code = 1000 + esp_random() % 9000; s_authed = false;
 static void status_async(void *arg) { ui_status_changed(); }
 static void ui_kick(void) { if (ui_lock(200)) { lv_async_call(status_async, NULL); ui_unlock(); } }
 
+#define STATUS_MAX 1800     /* 6 escaped SSIDs at worst + the rest; heap, not the NimBLE stack */
+
 static int status_json(char *buf, int len)
 {
-    char nets[240];
-    net_wifi_list_json(nets, sizeof(nets));
-    return snprintf(buf, len,
+    char *nets = malloc(1300);
+    char ssid[6 * 32 + 1];
+    if (!nets) return snprintf(buf, len, "{}");
+    net_wifi_list_json(nets, 1300);
+    json_esc(ssid, sizeof(ssid), g_set.ssid);
+    int n = snprintf(buf, len,
         "{\"ver\":\"0.7\",\"auth\":%s,\"batt\":%d,\"chg\":%s,\"wifi\":%s,\"ssid\":\"%s\",\"time\":%s,\"tz\":%d,"
         "\"hunger\":%d,\"dirt\":%d,\"workouts\":%u,\"total\":%lu,\"steps\":%lu,\"nets\":%s,\"rs\":%d,\"rw\":%d,\"lk\":%s}",
         s_authed ? "true" : "false", hw_battery_percent(), hw_charging() ? "true" : "false",
-        net_wifi_connected() ? "true" : "false", g_set.ssid, net_time_valid() ? "true" : "false", g_set.tz_min,
+        net_wifi_connected() ? "true" : "false", ssid, net_time_valid() ? "true" : "false", g_set.tz_min,
         (int)g_set.hunger, (int)g_set.dirt, g_set.workouts, (unsigned long)g_set.total_kg, (unsigned long)g_set.steps, nets, g_set.remind_sit, g_set.remind_water, g_set.light_key[0] ? "true" : "false");
+    free(nets);
+    return n < len ? n : len - 1;
 }
 
 void ble_notify_status(void)
 {
     if (!ble_connected() || !s_authed) return;
-    char buf[512];
-    int n = status_json(buf, sizeof(buf));
+    /* Longer than MTU-3 gets cut off by the stack; the phone page then reads the full value. */
+    char *buf = malloc(STATUS_MAX);
+    if (!buf) return;
+    int n = status_json(buf, STATUS_MAX);
+    int max = ble_att_mtu(s_conn) - 3;              /* the stack would cut it here anyway */
+    if (max > 0 && n > max) n = max;
     struct os_mbuf *om = ble_hs_mbuf_from_flat(buf, n);
+    free(buf);
     if (om) ble_gatts_notify_custom(s_conn, s_status_h, om);
 }
 
@@ -116,9 +128,12 @@ static int access_cb(uint16_t conn, uint16_t attr, struct ble_gatt_access_ctxt *
     char buf[200];
     if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) {
         if (which == 5) {
-            char js[512];
-            int n = status_json(js, sizeof(js));
-            return os_mbuf_append(ctxt->om, js, n) == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
+            char *js = malloc(STATUS_MAX);
+            if (!js) return BLE_ATT_ERR_INSUFFICIENT_RES;
+            int n = status_json(js, STATUS_MAX);
+            int rc = os_mbuf_append(ctxt->om, js, n) == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
+            free(js);
+            return rc;
         }
         return 0;
     }

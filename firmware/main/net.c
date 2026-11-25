@@ -64,6 +64,7 @@ static void sntp_cb(struct timeval *tv)
 #include "nvs.h"
 #include "esp_timer.h"
 #include "freertos/event_groups.h"
+#include "freertos/semphr.h"
 #define MAX_NETS 6
 typedef struct { char ssid[33]; char pass[65]; } net_t;
 static net_t s_nets[MAX_NETS];
@@ -73,6 +74,40 @@ static TaskHandle_t s_mgr;
 static volatile int s_users;            /* jobs that need WiFi right now */
 static esp_timer_handle_t s_off_timer;
 static volatile bool s_radio_on;
+/* s_users is changed from many tasks (ntp, weather, light, BLE host): keep it atomic.
+ * s_radio_lock serialises switching the radio on/off against the idle-off timer. */
+static portMUX_TYPE s_users_mux = portMUX_INITIALIZER_UNLOCKED;
+static SemaphoreHandle_t s_radio_lock;
+static int users_add(int d)
+{
+    taskENTER_CRITICAL(&s_users_mux);
+    int v = s_users + d;
+    if (v < 0) v = 0;
+    s_users = v;
+    taskEXIT_CRITICAL(&s_users_mux);
+    return v;
+}
+static void radio_lock(void) { if (s_radio_lock) xSemaphoreTake(s_radio_lock, portMAX_DELAY); }
+static void radio_unlock(void) { if (s_radio_lock) xSemaphoreGive(s_radio_lock); }
+
+/* Writes `in` as the inside of a JSON string ("" not included). Always NUL-terminates. */
+int json_esc(char *out, int len, const char *in)
+{
+    int n = 0;
+    if (len <= 0) return 0;
+    for (const unsigned char *p = (const unsigned char *)in; *p; p++) {
+        char t[8];
+        int k;
+        if (*p == '"' || *p == '\\') { t[0] = '\\'; t[1] = (char)*p; k = 2; }
+        else if (*p < 0x20) k = snprintf(t, sizeof(t), "\\u%04x", *p);
+        else { t[0] = (char)*p; k = 1; }
+        if (n + k >= len) break;
+        memcpy(out + n, t, k);
+        n += k;
+    }
+    out[n] = 0;
+    return n;
+}
 #define EV_GOT_IP BIT0
 #define EV_DISC   BIT1
 
@@ -131,11 +166,18 @@ void net_wifi_del(const char *ssid)
     }
 }
 
+/* JSON array of the saved SSIDs, escaped; drops trailing names rather than overflow. */
 int net_wifi_list_json(char *buf, int len)
 {
+    if (len < 3) { if (len > 0) buf[0] = 0; return 0; }
     int n = snprintf(buf, len, "[");
-    for (int i = 0; i < s_nnets && n < len - 40; i++)
-        n += snprintf(buf + n, len - n, "%s\"%s\"", i ? "," : "", s_nets[i].ssid);
+    char e[6 * 32 + 1];
+    for (int i = 0, first = 1; i < s_nnets; i++) {
+        int k = json_esc(e, sizeof(e), s_nets[i].ssid);
+        if (n + k + 4 >= len) break;                  /* room for ,"..." and the closing ] */
+        n += snprintf(buf + n, len - n, "%s\"%s\"", first ? "" : ",", e);
+        first = 0;
+    }
     n += snprintf(buf + n, len - n, "]");
     return n;
 }
@@ -164,6 +206,23 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
     }
 }
 
+static bool join(int k, int rssi, int timeout_ms)
+{
+    wifi_config_t wc = {0};
+    strncpy((char *)wc.sta.ssid, s_nets[k].ssid, sizeof(wc.sta.ssid));
+    strncpy((char *)wc.sta.password, s_nets[k].pass, sizeof(wc.sta.password));
+    wc.sta.threshold.authmode = s_nets[k].pass[0] ? WIFI_AUTH_WPA_PSK : WIFI_AUTH_OPEN;
+    esp_wifi_set_config(WIFI_IF_STA, &wc);
+    memset(g_set.ssid, 0, sizeof(g_set.ssid));
+    strncpy(g_set.ssid, s_nets[k].ssid, sizeof(g_set.ssid) - 1);
+    xEventGroupClearBits(s_ev, EV_GOT_IP | EV_DISC);
+    ESP_LOGI(TAG, "joining %s (%d dBm)", g_set.ssid, rssi);
+    esp_wifi_connect();
+    EventBits_t b = xEventGroupWaitBits(s_ev, EV_GOT_IP | EV_DISC, pdTRUE, pdFALSE, pdMS_TO_TICKS(timeout_ms));
+    if (!(b & (EV_GOT_IP | EV_DISC))) snprintf(s_err, sizeof(s_err), "%s 连接超时（拿不到 IP）", g_set.ssid);
+    return (b & EV_GOT_IP) != 0;
+}
+
 static bool try_join(void)
 {
     if (!s_nnets) return false;
@@ -174,49 +233,62 @@ static bool try_join(void)
     if (!ap) return false;
     esp_wifi_scan_get_ap_records(&n, ap);
     int best = -1, rssi = -127;
-    for (int i = 0; i < n; i++)
+    bool seen[MAX_NETS] = {0}, hidden = false;
+    for (int i = 0; i < n; i++) {
+        if (!ap[i].ssid[0]) hidden = true;            /* hidden networks scan with an empty name */
         for (int k = 0; k < s_nnets; k++)
-            if (!strcmp((char *)ap[i].ssid, s_nets[k].ssid) && ap[i].rssi > rssi) { rssi = ap[i].rssi; best = k; }
+            if (!strcmp((char *)ap[i].ssid, s_nets[k].ssid)) {
+                seen[k] = true;
+                if (ap[i].rssi > rssi) { rssi = ap[i].rssi; best = k; }
+            }
+    }
     free(ap);
-    if (best < 0) { ESP_LOGI(TAG, "no known network in range (%d seen)", n); snprintf(s_err, sizeof(s_err), "附近没有记住的 WiFi（看到 %d 个）", n); return false; }
-    wifi_config_t wc = {0};
-    strncpy((char *)wc.sta.ssid, s_nets[best].ssid, sizeof(wc.sta.ssid));
-    strncpy((char *)wc.sta.password, s_nets[best].pass, sizeof(wc.sta.password));
-    wc.sta.threshold.authmode = s_nets[best].pass[0] ? WIFI_AUTH_WPA_PSK : WIFI_AUTH_OPEN;
-    esp_wifi_set_config(WIFI_IF_STA, &wc);
-    strncpy(g_set.ssid, s_nets[best].ssid, sizeof(g_set.ssid) - 1);
-    xEventGroupClearBits(s_ev, EV_GOT_IP | EV_DISC);
-    ESP_LOGI(TAG, "joining %s (%d dBm)", g_set.ssid, rssi);
-    esp_wifi_connect();
-    EventBits_t b = xEventGroupWaitBits(s_ev, EV_GOT_IP | EV_DISC, pdTRUE, pdFALSE, pdMS_TO_TICKS(15000));
-    if (!(b & (EV_GOT_IP | EV_DISC))) snprintf(s_err, sizeof(s_err), "%s 连接超时（拿不到 IP）", g_set.ssid);
-    return (b & EV_GOT_IP) != 0;
+    if (best >= 0) return join(best, rssi, 15000);
+    /* None of ours is visible by name, but a hidden network is around: it could be one of
+     * ours. Connecting with the SSID set sends a directed probe, which hidden APs answer. */
+    if (hidden)
+        for (int k = 0; k < s_nnets; k++)
+            if (!seen[k] && join(k, 0, 10000)) return true;
+    ESP_LOGI(TAG, "no known network in range (%d seen)", n);
+    snprintf(s_err, sizeof(s_err), "附近没有记住的 WiFi（看到 %d 个）", n);
+    return false;
 }
 
 /* WiFi is only switched on while something needs it (time sync, weather, office
  * light, adding a network) and switched off 20 s after the last job finishes. */
 static void radio_off_cb(void *arg)
 {
-    if (s_users > 0 || !s_radio_on) return;
-    esp_wifi_disconnect();
-    esp_wifi_stop();
-    s_radio_on = false;
-    s_wifi_up = false;
-    ESP_LOGI(TAG, "wifi off (idle)");
-    notify_ui();
+    bool off = false;
+    radio_lock();
+    if (s_users == 0 && s_radio_on) {          /* re-checked under the lock: a job may have just started */
+        esp_wifi_disconnect();
+        esp_wifi_stop();
+        s_radio_on = false;
+        s_wifi_up = false;
+        off = true;
+    }
+    radio_unlock();
+    if (off) { ESP_LOGI(TAG, "wifi off (idle)"); notify_ui(); }
+}
+
+static void radio_up(void)
+{
+    if (!s_wifi_enabled || !s_wifi_started) return;
+    radio_lock();
+    if (!s_radio_on) { s_radio_on = true; esp_wifi_start(); ESP_LOGI(TAG, "wifi on"); }
+    radio_unlock();
+    net_wifi_reconnect();
 }
 
 void net_wifi_use(bool on)
 {
     if (on) {
-        s_users++;
+        users_add(1);
+        if (s_off_timer) esp_timer_stop(s_off_timer);
+        radio_up();
+    } else if (users_add(-1) == 0 && s_off_timer) {
         esp_timer_stop(s_off_timer);
-        if (!s_wifi_enabled || !s_wifi_started) return;
-        if (!s_radio_on) { s_radio_on = true; esp_wifi_start(); ESP_LOGI(TAG, "wifi on"); }
-        net_wifi_reconnect();
-    } else {
-        if (s_users > 0) s_users--;
-        if (s_users == 0) { esp_timer_stop(s_off_timer); esp_timer_start_once(s_off_timer, 20 * 1000000); }
+        esp_timer_start_once(s_off_timer, 20 * 1000000);
     }
 }
 
@@ -268,8 +340,11 @@ void net_wifi_enable(bool on)
 {
     if (on == s_wifi_enabled) return;
     s_wifi_enabled = on;
-    if (!on && s_radio_on) { esp_wifi_disconnect(); esp_wifi_stop(); s_radio_on = false; s_wifi_up = false; }
-    if (on && s_users > 0) { s_users--; net_wifi_use(true); }
+    if (!on) {
+        radio_lock();
+        if (s_radio_on) { esp_wifi_disconnect(); esp_wifi_stop(); s_radio_on = false; s_wifi_up = false; }
+        radio_unlock();
+    } else if (s_users > 0) radio_up();
 }
 
 void net_init(void)
@@ -283,6 +358,7 @@ void net_init(void)
         ESP_LOGI(TAG, "time restored from RTC");
     }
     s_ev = xEventGroupCreate();
+    s_radio_lock = xSemaphoreCreateMutex();
     nets_load();
 
     esp_netif_init();

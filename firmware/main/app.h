@@ -130,6 +130,7 @@ const char *net_last_error(void);
 void net_wifi_add(const char *ssid, const char *pass);
 void net_wifi_del(const char *ssid);
 int net_wifi_list_json(char *buf, int len);
+int json_esc(char *out, int len, const char *in);
 int net_wifi_count(void);
 
 /* ---------- bluetooth settings service (ble.c) ---------- */
