@@ -374,8 +374,16 @@ static int gap_cb(struct ble_gap_event *ev, void *arg)
 {
     switch (ev->type) {
     case BLE_GAP_EVENT_CONNECT:
-        if (ev->connect.status == 0) { s_conn = ev->connect.conn_handle; s_authed = false; s_encrypted = false; s_hid_sub = false; }
-        else advertise();
+        if (ev->connect.status != 0) { advertise(); break; }
+        if (s_conn != BLE_HS_CONN_HANDLE_NONE) {
+            /* a second phone: one link at a time (the same phone reuses its existing link) */
+            ble_gap_terminate(ev->connect.conn_handle, BLE_ERR_CONN_LIMIT);
+            break;
+        }
+        s_conn = ev->connect.conn_handle; s_authed = false; s_encrypted = false; s_hid_sub = false;
+        /* keep advertising: Android's HID host or the notification app may hold this link in the
+         * background, and Chrome on the same phone can only pick the watch if it still sees it */
+        if (s_on) advertise();
         ui_kick();
         break;
     case BLE_GAP_EVENT_DISCONNECT:

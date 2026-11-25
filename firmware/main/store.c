@@ -74,6 +74,11 @@ void store_save(void)
 
 void store_save_fish(void) { store_save(); }
 
+/* Tasks with a PSRAM stack must not write flash: they ask, and the UI task saves on its next tick. */
+static volatile bool s_save_later;
+void store_save_later(void) { s_save_later = true; }
+void store_save_pending(void) { if (s_save_later) { s_save_later = false; store_save(); } }
+
 bool store_sd_ok(void) { return s_sd_ok; }
 
 void store_log_set(const char *lift, float kg, int reps)

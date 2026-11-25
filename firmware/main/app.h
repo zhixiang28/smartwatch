@@ -77,6 +77,9 @@ const char *weather_text(int code);
 extern settings_t g_set;
 void store_init(void);
 void store_save(void);              /* writes everything to NVS */
+void store_save_later(void);        /* from tasks with a PSRAM stack (no flash access there) */
+void store_save_pending(void);      /* UI task: do the deferred save */
+int office_light(int which, int on, char *out, int outlen);   /* which 0 both/1 ceiling/2 wall; on 1/0, -1 = report */
 void store_save_fish(void);         /* writes fish state only */
 bool store_sd_ok(void);
 int store_boot_begin(void);      /* returns how many boots in a row crashed */

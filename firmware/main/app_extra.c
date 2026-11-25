@@ -84,6 +84,48 @@ static void light_kick(void) { if (ui_lock(300)) { lv_async_call(light_async, NU
 static TaskHandle_t s_l_task;
 static volatile int s_l_req;
 
+/* read state + invert flags into s_l_state / s_l_inv; returns HTTP status */
+static int light_read(char *buf, int n)
+{
+    int st = http_call("/rest/v1/smartlight?id=eq.1&select=state,state2,invert1,invert2", NULL, buf, n);
+    if (st != 200) return st;
+    cJSON *j = cJSON_Parse(buf), *o = j ? cJSON_GetArrayItem(j, 0) : NULL;
+    if (!o) { cJSON_Delete(j); return -5; }
+    const char *sk[2] = {"state", "state2"}, *ik[2] = {"invert1", "invert2"};
+    for (int i = 0; i < 2; i++) {
+        cJSON *v = cJSON_GetObjectItem(o, sk[i]);
+        s_l_inv[i] = cJSON_IsTrue(cJSON_GetObjectItem(o, ik[i]));
+        if (!cJSON_IsString(v)) { s_l_state[i][0] = 0; continue; }
+        bool on = !strcmp(v->valuestring, "ON") != s_l_inv[i];
+        snprintf(s_l_state[i], 4, "%s", on ? "ON" : "OFF");
+    }
+    cJSON_Delete(j);
+    return 200;
+}
+
+/* switch channel 1/2 so the light really is on/off; returns HTTP status (401-ish: account) */
+static int light_switch(int ch, bool want_on, char *buf, int n)
+{
+    const char *cmd = want_on != s_l_inv[ch - 1] ? "ON" : "OFF";    /* as a servo command */
+    char body[200], pin[70], who[80];
+    json_esc(pin, sizeof(pin), g_set.light_pin);
+    json_esc(who, sizeof(who), g_set.light_person);
+    snprintf(body, sizeof(body), "{\"p_person_id\":\"%s\",\"p_pin\":\"%s\",\"ch\":%d,\"new_state\":\"%s\"}", who, pin, ch, cmd);
+    int st = http_call("/rest/v1/rpc/light_set", body, buf, n);
+    if (st >= 400 && strstr(buf, "not signed in")) {
+        /* PIN changed or the account is locked. Forget the PIN at once: retrying a wrong PIN
+         * 5 times locks the account (and emails the owner). The phone signs in again. */
+        g_set.light_pin[0] = 0;
+        store_save_later();                        /* callers have PSRAM stacks */
+        ble_notify_status();
+        snprintf(s_l_detail, sizeof(s_l_detail), "账号的 PIN 不对，请在手机网页重新登入");
+        return 401;
+    }
+    if (st >= 400) snprintf(s_l_detail, sizeof(s_l_detail), "服务器回应 %d：%.60s", st, buf);
+    ESP_LOGI(TAG, "light set ch%d %s -> %d", ch, cmd, st);
+    return st;
+}
+
 static void light_job(int ch)
 {
     /* ch: 0 = only read, 1/2 = toggle that channel */
@@ -94,47 +136,47 @@ static void light_job(int ch)
         s_l_err = 1; s_l_busy = false; light_kick(); return;
     }
     if (ch && g_set.light_person[0] && g_set.light_pin[0]) {
-        bool want_on = strcmp(s_l_state[ch - 1], "ON") != 0;              /* flip what the light really is */
-        const char *cmd = want_on != s_l_inv[ch - 1] ? "ON" : "OFF";       /* ...as a servo command */
-        char body[200], pin[70], who[80];
-        json_esc(pin, sizeof(pin), g_set.light_pin);
-        json_esc(who, sizeof(who), g_set.light_person);
-        snprintf(body, sizeof(body), "{\"p_person_id\":\"%s\",\"p_pin\":\"%s\",\"ch\":%d,\"new_state\":\"%s\"}",
-                 who, pin, ch, cmd);
-        int st = http_call("/rest/v1/rpc/light_set", body, buf, sizeof(buf));
+        int st = light_switch(ch, strcmp(s_l_state[ch - 1], "ON") != 0, buf, sizeof(buf));
         s_l_err = st == 200 ? 0 : (st >= 400 ? 2 : 1);
-        if (st >= 400 && strstr(buf, "not signed in")) {
-            /* PIN changed or the account is locked. Forget the PIN at once: retrying a wrong PIN
-             * 5 times locks the account (and emails the owner). The phone signs in again. */
-            g_set.light_pin[0] = 0;
-            store_save();
-            ble_notify_status();
-            snprintf(s_l_detail, sizeof(s_l_detail), "账号的 PIN 不对，请在手机网页重新登入");
-        } else if (st >= 400) snprintf(s_l_detail, sizeof(s_l_detail), "服务器回应 %d：%.60s", st, buf);
-        ESP_LOGI(TAG, "light set ch%d -> %d %s", ch, st, st == 200 ? buf : "");
     }
-    int st = http_call("/rest/v1/smartlight?id=eq.1&select=state,state2,invert1,invert2", NULL, buf, sizeof(buf));
-    if (st == 200) {
-        cJSON *j = cJSON_Parse(buf), *o = j ? cJSON_GetArrayItem(j, 0) : NULL;
-        if (o) {
-            const char *sk[2] = {"state", "state2"}, *ik[2] = {"invert1", "invert2"};
-            for (int i = 0; i < 2; i++) {
-                cJSON *v = cJSON_GetObjectItem(o, sk[i]);
-                s_l_inv[i] = cJSON_IsTrue(cJSON_GetObjectItem(o, ik[i]));
-                if (!cJSON_IsString(v)) { s_l_state[i][0] = 0; continue; }
-                bool on = !strcmp(v->valuestring, "ON") != s_l_inv[i];
-                snprintf(s_l_state[i], 4, "%s", on ? "ON" : "OFF");
-            }
-            if (!ch) s_l_err = 0;
-        } else if (!ch) {
-            s_l_err = 1;
-            snprintf(s_l_detail, sizeof(s_l_detail), "服务器的回应不对：%.50s", buf);
+    int st = light_read(buf, sizeof(buf));
+    if (st == 200) { if (!ch) s_l_err = 0; }
+    else if (!ch) {
+        s_l_err = 1;
+        if (!s_l_detail[0]) {
+            if (st == -5) snprintf(s_l_detail, sizeof(s_l_detail), "服务器的回应不对：%.50s", buf);
+            else snprintf(s_l_detail, sizeof(s_l_detail), "读取失败（%d）", st);
         }
-        cJSON_Delete(j);
-    } else if (!ch) { s_l_err = 1; if (!s_l_detail[0]) snprintf(s_l_detail, sizeof(s_l_detail), "读取失败（%d）", st); }
+    }
     ESP_LOGI(TAG, "light read -> %d", st);
     s_l_busy = false;
     light_kick();
+}
+
+/* For 小智's tool calls (runs on a PSRAM-stack task). Writes a short spoken answer into out. */
+int office_light(int which, int on, char *out, int outlen)
+{
+    static const char *NAME[3] = {"灯", "天花板灯", "墙壁射灯"};
+    char buf[256];
+    if (!g_set.light_person[0] || !g_set.light_pin[0]) { snprintf(out, outlen, "还没有登入灯光账号，请先在手机设定网页登入"); return -1; }
+    if (!net_wait_connected(15000)) { snprintf(out, outlen, "手表没有连上网络"); return -1; }
+    if (light_read(buf, sizeof(buf)) != 200) { snprintf(out, outlen, "连不上灯光系统"); return -1; }
+    if (on >= 0) {
+        for (int ch = 1; ch <= 2; ch++) {
+            if (which && which != ch) continue;
+            if (!strcmp(s_l_state[ch - 1], on ? "ON" : "OFF")) continue;      /* already so */
+            int st = light_switch(ch, on, buf, sizeof(buf));
+            if (st == 401) { snprintf(out, outlen, "灯光账号的 PIN 不对了，请在手机设定网页重新登入"); return -1; }
+            if (st != 200) { snprintf(out, outlen, "%s没有切换成功（%d）", NAME[ch], st); return -1; }
+        }
+        vTaskDelay(pdMS_TO_TICKS(300));
+        light_read(buf, sizeof(buf));
+        light_kick();                                                       /* refresh the light screen if open */
+    }
+    snprintf(out, outlen, "天花板灯%s，墙壁射灯%s",
+             !strcmp(s_l_state[0], "ON") ? "开着" : s_l_state[0][0] ? "关着" : "状态不明",
+             !strcmp(s_l_state[1], "ON") ? "开着" : s_l_state[1][0] ? "关着" : "状态不明");
+    return 0;
 }
 
 static void light_worker(void *arg)
@@ -247,7 +289,7 @@ static void game_step(lv_timer_t *t)
     float ax, ay;
     hw_tilt(&ax, &ay);
     /* tilt relative to how the watch was held when the round started */
-    s_vx += (ay - s_ty0) * 1.6f;
+    s_vx -= (ay - s_ty0) * 1.6f;                 /* tilt right -> fish goes right (was mirrored) */
     s_vy += (ax - s_tx0) * 1.6f;
     s_vx *= 0.96f; s_vy *= 0.96f;
     s_bx += s_vx; s_by += s_vy;

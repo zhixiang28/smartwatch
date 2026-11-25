@@ -65,6 +65,7 @@ static volatile bool s_listening;             /* "listen start" has been sent on
 static volatile bool s_want_listen;           /* the button is held */
 static volatile bool s_lost;                  /* server closed an idle connection: reconnect on the next press */
 static TaskHandle_t s_xl;                     /* 翻译 worker */
+static QueueHandle_t s_mcpq;                  /* MCP requests from the server (char *, PSRAM) */
 static char s_xl_text[240];
 static TaskHandle_t s_ctl, s_mic, s_spk;
 typedef struct { uint16_t len; uint8_t d[]; } pkt_t;
@@ -147,7 +148,7 @@ static int check_server(void)
              "\"application\":{\"name\":\"fishwatch\",\"version\":\"%s\",\"compile_time\":\"%sT%sZ\",\"idf_version\":\"%s\",\"elf_sha256\":\"\"},"
              "\"partition_table\":[],\"ota\":{\"label\":\"factory\"},"
              "\"board\":{\"type\":\"waveshare-esp32-s3-touch-amoled-2.06\",\"name\":\"FishWatch\",\"mac\":\"%s\"},"
-             "\"protocol\":{\"features\":{\"mcp\":false,\"aec\":false}}}",
+             "\"protocol\":{\"features\":{\"mcp\":true,\"aec\":false}}}",
              mac, g_set.xz_uuid, app->version, app->date, app->time, app->idf_ver, mac);
     int st = ota_post(ota_url(), body, resp, 4096);
     int ret = -1;
@@ -229,7 +230,11 @@ static void on_json(const char *data, size_t len)
             if (s_st == XZ_SPEAK || s_st == XZ_THINK) s_st = XZ_READY;
         }
     }
-    /* llm (emotion), mcp, system...: not used */
+    else if (!strcmp(type, "mcp") && s_mcpq) {           /* device tools (lights): handled on the MCP task */
+        char *pl = cJSON_PrintUnformatted(cJSON_GetObjectItem(j, "payload"));
+        if (pl && xQueueSend(s_mcpq, &pl, 0) != pdTRUE) cJSON_free(pl);
+    }
+    /* llm (emotion), system...: not used */
     cJSON_Delete(j);
 }
 
@@ -288,7 +293,7 @@ static bool ws_open(void)
     EventBits_t b = xEventGroupWaitBits(s_ev, EV_CONNECTED | EV_CLOSED, pdFALSE, pdFALSE, pdMS_TO_TICKS(12000));
     if (!(b & EV_CONNECTED)) { ws_close(); fail("连不上小智服务器"); return false; }
     char hello[200];
-    int n = snprintf(hello, sizeof(hello), "{\"type\":\"hello\",\"version\":1,\"features\":{\"mcp\":false},\"transport\":\"websocket\","
+    int n = snprintf(hello, sizeof(hello), "{\"type\":\"hello\",\"version\":1,\"features\":{\"mcp\":true},\"transport\":\"websocket\","
                      "\"audio_params\":{\"format\":\"opus\",\"sample_rate\":16000,\"channels\":1,\"frame_duration\":60}}");
     esp_websocket_client_send_text(s_ws, hello, n, pdMS_TO_TICKS(3000));
     b = xEventGroupWaitBits(s_ev, EV_HELLO | EV_CLOSED, pdFALSE, pdFALSE, pdMS_TO_TICKS(10000));
@@ -589,6 +594,74 @@ static void xl_task(void *arg)
     }
 }
 
+/* ---------------- MCP: tools 小智 can call on the watch ----------------
+ * JSON-RPC 2.0 inside {"type":"mcp","payload":...}, the "2024-11-05" flavour the official
+ * firmware answers (mcp_server.cc): initialize, tools/list, tools/call. */
+static const char *MCP_TOOLS =
+    "{\"tools\":["
+    "{\"name\":\"self.office_light.set\",\"description\":\"打开或关闭 Makerspace 办公室的灯。light: ceiling=天花板灯, wall=墙壁射灯, all=两盏都要；on: true=打开, false=关掉。用户说开灯/关灯但没说哪盏时用 all。\","
+    "\"inputSchema\":{\"type\":\"object\",\"properties\":{\"light\":{\"type\":\"string\",\"enum\":[\"ceiling\",\"wall\",\"all\"]},\"on\":{\"type\":\"boolean\"}},\"required\":[\"light\",\"on\"]}},"
+    "{\"name\":\"self.office_light.get\",\"description\":\"查询 Makerspace 办公室的天花板灯和墙壁射灯现在开着还是关着。\","
+    "\"inputSchema\":{\"type\":\"object\",\"properties\":{}}}"
+    "]}";
+
+static void mcp_send(const char *id, const char *body_key, const char *body)
+{
+    if (!s_ws || !esp_websocket_client_is_connected(s_ws)) return;
+    size_t n = strlen(body) + strlen(id) + 160;
+    char *m = heap_caps_malloc(n, MALLOC_CAP_SPIRAM);
+    if (!m) return;
+    int len = snprintf(m, n, "{\"session_id\":\"%s\",\"type\":\"mcp\",\"payload\":{\"jsonrpc\":\"2.0\",\"id\":%s,\"%s\":%s}}", s_session, id, body_key, body);
+    esp_websocket_client_send_text(s_ws, m, len, pdMS_TO_TICKS(3000));
+    free(m);
+}
+
+static void mcp_task(void *arg)
+{
+    for (;;) {
+        char *pl;
+        if (xQueueReceive(s_mcpq, &pl, portMAX_DELAY) != pdTRUE) continue;
+        cJSON *j = cJSON_Parse(pl);
+        cJSON_free(pl);
+        const char *method = j ? cJSON_GetStringValue(cJSON_GetObjectItem(j, "method")) : NULL;
+        cJSON *idv = j ? cJSON_GetObjectItem(j, "id") : NULL;
+        char *id = idv ? cJSON_PrintUnformatted(idv) : NULL;
+        if (!method || !id) { cJSON_free(id); cJSON_Delete(j); continue; }    /* notifications: no reply */
+        ESP_LOGI(TAG, "mcp %s", method);
+        if (!strcmp(method, "initialize")) {
+            char r[200];
+            snprintf(r, sizeof(r), "{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"fishwatch\",\"version\":\"%s\"}}",
+                     esp_app_get_description()->version);
+            mcp_send(id, "result", r);
+        } else if (!strcmp(method, "tools/list")) {
+            mcp_send(id, "result", MCP_TOOLS);
+        } else if (!strcmp(method, "tools/call")) {
+            cJSON *params = cJSON_GetObjectItem(j, "params");
+            const char *name = cJSON_GetStringValue(cJSON_GetObjectItem(params, "name"));
+            cJSON *args = cJSON_GetObjectItem(params, "arguments");
+            char text[160], esc[400], r[520];
+            int rc = -1;
+            if (name && !strcmp(name, "self.office_light.set")) {
+                const char *l = cJSON_GetStringValue(cJSON_GetObjectItem(args, "light"));
+                cJSON *on = cJSON_GetObjectItem(args, "on");
+                int which = l && !strcmp(l, "ceiling") ? 1 : l && !strcmp(l, "wall") ? 2 : 0;
+                set_txt(s_bot, sizeof(s_bot), cJSON_IsTrue(on) ? "开灯中…" : "关灯中…");
+                rc = office_light(which, cJSON_IsTrue(on) ? 1 : 0, text, sizeof(text));
+            } else if (name && !strcmp(name, "self.office_light.get")) {
+                rc = office_light(0, -1, text, sizeof(text));
+            } else snprintf(text, sizeof(text), "没有这个工具");
+            set_txt(s_bot, sizeof(s_bot), text);
+            json_esc(esc, sizeof(esc), text);
+            snprintf(r, sizeof(r), "{\"content\":[{\"type\":\"text\",\"text\":\"%s\"}],\"isError\":%s}", esc, rc == 0 ? "false" : "true");
+            mcp_send(id, "result", r);
+        } else {
+            mcp_send(id, "error", "{\"code\":-32601,\"message\":\"Method not found\"}");
+        }
+        cJSON_free(id);
+        cJSON_Delete(j);
+    }
+}
+
 static bool xz_tasks(void)
 {
     if (s_ctl) return true;
@@ -600,6 +673,8 @@ static bool xz_tasks(void)
     if (xTaskCreateWithCaps(mic_task, "xz_mic", 32768, NULL, 5, &s_mic, MALLOC_CAP_SPIRAM) != pdPASS) return false;
     if (xTaskCreateWithCaps(spk_task, "xz_spk", 16384, NULL, 5, &s_spk, MALLOC_CAP_SPIRAM) != pdPASS) return false;
     if (xTaskCreateWithCaps(xl_task, "xz_tr", 12288, NULL, 4, &s_xl, MALLOC_CAP_SPIRAM) != pdPASS) return false;
+    s_mcpq = xQueueCreateWithCaps(8, sizeof(char *), MALLOC_CAP_SPIRAM);
+    if (!s_mcpq || xTaskCreateWithCaps(mcp_task, "xz_mcp", 10240, NULL, 4, NULL, MALLOC_CAP_SPIRAM) != pdPASS) return false;
     return true;
 }
 

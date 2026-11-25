@@ -77,6 +77,7 @@ static void tick(lv_timer_t *t)
     static bool wdt_added;
     if (!wdt_added) wdt_added = esp_task_wdt_add(NULL) == ESP_OK;
     else esp_task_wdt_reset();
+    store_save_pending();
     /* background jobs that run even with the screen off */
     uint32_t n = hw_steps();
     if (net_time_valid()) {
