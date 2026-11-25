@@ -34,8 +34,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if ! gh release view notify-app >/dev/null 2>&1; then
-            gh release create notify-app --target "$GITHUB_SHA" --title "FishWatch 通知 App" \
-              --notes "安装 fishwatch-notify.apk（要允许安装未知来源的应用）。手表要刷 0.8.0 以上，并在手表「通知」里打开「收通知」。"
-          fi
-          gh release upload notify-app fishwatch-notify.apk --clobber
+          # the releases API sometimes answers 5xx: retry a few times
+          for i in 1 2 3 4 5; do
+            if gh release view notify-app >/dev/null 2>&1 || \
+               gh release create notify-app --target "$GITHUB_SHA" --title "FishWatch 通知 App" \
+                 --notes "安装 fishwatch-notify.apk（要允许安装未知来源的应用）。手表要刷 0.8.0 以上，并在手表「通知」里打开「收通知」。"; then
+              gh release upload notify-app fishwatch-notify.apk --clobber && exit 0
+            fi
+            sleep $((i * 10))
+          done
+          exit 1
