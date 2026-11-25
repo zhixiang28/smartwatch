@@ -10,6 +10,8 @@
 #include "esp_random.h"
 #include "esp_log.h"
 #include "cJSON.h"
+#include "freertos/idf_additions.h"
+#include "esp_heap_caps.h"
 #include "app.h"
 
 extern void (*g_app_refresh)(void);
@@ -56,14 +58,21 @@ static void light_paint(void);
 static void light_async(void *arg) { if (s_l_info) light_paint(); }
 static void light_kick(void) { if (ui_lock(300)) { lv_async_call(light_async, NULL); ui_unlock(); } }
 
-static void light_task(void *arg)
+/* One worker, created on first use with its stack in PSRAM and then kept. It used to be a
+ * fresh 8 KB task per tap with the stack in internal RAM; with WiFi + BLE + the display
+ * running that allocation failed, light_run() silently gave up, and the screen just said
+ * "点一下开关" with "--" while nothing was ever sent. */
+static TaskHandle_t s_l_task;
+static volatile int s_l_req;
+
+static void light_job(int ch)
 {
-    int ch = (int)(intptr_t)arg;            /* 0 = only read, 1/2 = toggle that channel */
+    /* ch: 0 = only read, 1/2 = toggle that channel */
     char buf[256];
     s_l_detail[0] = 0;
     if (!net_wait_connected(30000)) {
         snprintf(s_l_detail, sizeof(s_l_detail), "WiFi：%s", net_last_error()[0] ? net_last_error() : "还在找网络");
-        s_l_err = 1; s_l_busy = false; light_kick(); vTaskDelete(NULL); return;
+        s_l_err = 1; s_l_busy = false; light_kick(); return;
     }
     if (ch) {
         const char *now = s_l_state[ch - 1];
@@ -81,20 +90,43 @@ static void light_task(void *arg)
             cJSON *a = cJSON_GetObjectItem(o, "state"), *b = cJSON_GetObjectItem(o, "state2");
             snprintf(s_l_state[0], 4, "%s", cJSON_IsString(a) ? a->valuestring : "");
             snprintf(s_l_state[1], 4, "%s", cJSON_IsString(b) ? b->valuestring : "");
+            if (!ch) s_l_err = 0;
+        } else if (!ch) {
+            s_l_err = 1;
+            snprintf(s_l_detail, sizeof(s_l_detail), "服务器的回应不对：%.50s", buf);
         }
         cJSON_Delete(j);
-        if (!ch) s_l_err = 0;
     } else if (!ch) { s_l_err = 1; if (!s_l_detail[0]) snprintf(s_l_detail, sizeof(s_l_detail), "读取失败（%d）", st); }
+    ESP_LOGI(TAG, "light read -> %d", st);
     s_l_busy = false;
     light_kick();
-    vTaskDelete(NULL);
+}
+
+static void light_worker(void *arg)
+{
+    for (;;) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        light_job(s_l_req);
+    }
 }
 
 static void light_run(int ch)
 {
     if (s_l_busy || !net_wifi_count()) { light_paint(); return; }
+    if (!s_l_task &&
+        xTaskCreateWithCaps(light_worker, "light", 8192, NULL, 4, &s_l_task, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS &&
+        xTaskCreate(light_worker, "light", 8192, NULL, 4, &s_l_task) != pdPASS) {
+        s_l_task = NULL;
+        s_l_err = 1;
+        snprintf(s_l_detail, sizeof(s_l_detail), "内存不足，开不了连线（剩 %u B）",
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+        ESP_LOGW(TAG, "light worker: no memory");
+        light_paint();
+        return;
+    }
     s_l_busy = true;
-    if (xTaskCreate(light_task, "light", 8192, (void *)(intptr_t)ch, 4, NULL) != pdPASS) s_l_busy = false;
+    s_l_req = ch;
+    xTaskNotifyGive(s_l_task);
     light_paint();
 }
 
