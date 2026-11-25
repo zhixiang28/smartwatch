@@ -143,6 +143,13 @@
       <div class="it"><span class="k">电量</span><span class="v" id="sBatt">--</span></div>
       <div class="it"><span class="k">WiFi</span><span class="v" id="sWifi">--</span></div>
       <div class="it"><span class="k">时间</span><span class="v" id="sTime">--</span></div>
+      <div class="it"><span class="k">上次重启</span><span class="v" id="sRst">--</span></div>
+      <div class="it"><span class="k">手表固件</span><span class="v" id="sVer">--</span></div>
+      <div id="dumpBox" style="display:none;padding:10px 2px 12px">
+        <div class="note" style="margin:0 0 8px;color:var(--orange)">手表上次当机，留下了记录。下载后发给开发的人就能查出原因。</div>
+        <div class="note" id="dumpSum" style="margin:0 0 10px;font-family:ui-monospace,monospace;font-size:11px;word-break:break-all;white-space:pre-wrap"></div>
+        <div style="display:flex;gap:10px;flex-wrap:wrap"><button id="btnDump" class="sec" style="height:36px">下载当机记录</button><button id="btnDumpClear" class="del">清除记录</button></div>
+      </div>
     </div>
     <div class="hd">记住的 WIFI（自动连最强的那个）</div>
     <div class="card" style="padding:4px 16px" id="netList"><div class="empty">连接手表后显示</div></div>
@@ -337,7 +344,7 @@ $('btnConn').onclick = async () => {
   if (dev && dev.gatt.connected) { dev.gatt.disconnect(); return; }
   try {
     dev = await navigator.bluetooth.requestDevice({ filters: [{ namePrefix: 'FishWatch' }], optionalServices: [SVC] });
-    dev.addEventListener('gattserverdisconnected', onDisc);
+    dev.ongattserverdisconnected = onDisc;   /* the same device object comes back on reconnect: don't stack listeners */
     setState('正在连接…');
     const srv = await (await dev.gatt.connect()).getPrimaryService(SVC);
     ch = {};
@@ -413,8 +420,11 @@ async function syncData() {
     while ((i = rx.indexOf('\n')) >= 0) {
       const line = rx.slice(0, i); rx = rx.slice(i + 1);
       if (line === 'END') { db.last = Date.now(); saveDb(); render(); setState('已配对 · 已同步', 'ok'); log('同步完成'); continue; }
+      if (line === 'DUMP_END') { finishDump(); continue; }
       try {
         const o = JSON.parse(line);
+        if (o.t === 'dumpinfo') { dumpRx = { info: o, parts: [], got: 0 }; continue; }
+        if (o.t === 'dump') { if (dumpRx) { dumpRx.parts.push(o.d); dumpRx.got = o.o; $('dumpSum').textContent = `下载中… ${Math.round(o.o / 1024)} / ${Math.round(dumpRx.info.size / 1024)} KB`; } continue; }
         if (o.t === 'info') db.info = o;
         else if (o.t === 'hour') db.hour = o;
         else if (o.t === 'day') db.days[o.day] = o.steps;
@@ -426,6 +436,42 @@ async function syncData() {
   };
   await write('CMD', 'sync');
 }
+
+/* ---------- crash report (firmware 0.7.7+): reset reason + core dump ---------- */
+const RST = { poweron: '正常开机', sw: '软件重启', panic: '当机', task_wdt: '卡住（看门狗）', int_wdt: '卡住（中断看门狗）', wdt: '看门狗',
+  brownout: '电压不足', pwr_glitch: '电源不稳', cpu_lockup: 'CPU 锁死', usb: 'USB 重启', ext: '按键重启', deepsleep: '睡眠唤醒', jtag: '调试器', other: '其他' };
+const BAD_RST = ['panic', 'task_wdt', 'int_wdt', 'wdt', 'brownout', 'pwr_glitch', 'cpu_lockup'];
+let dumpRx = null, lastDumpInfo = null;
+function finishDump() {
+  const r = dumpRx; dumpRx = null;
+  if (!r) return;
+  lastDumpInfo = r.info;
+  $('dumpSum').textContent = (r.info.sum || '') + (r.info.app ? `\n固件 ${r.info.app} · ${r.info.elf}` : '');
+  if (!r.info.size) { log('手表没有当机记录'); return; }
+  const bin = Uint8Array.from(atob(r.parts.join('')), c => c.charCodeAt(0));
+  if (bin.length !== r.info.size) { log(`当机记录不完整（${bin.length}/${r.info.size}），再试一次`); return; }
+  const blob = new Blob([bin], { type: 'application/octet-stream' });
+  const d = new Date(), p = n => String(n).padStart(2, '0');
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `fishwatch-coredump-${r.info.app || ''}-${r.info.elf || ''}-${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}.bin`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+  log('当机记录已下载：' + a.download + '（' + bin.length + ' 字节）');
+}
+$('btnDump').onclick = async () => {
+  if (!ch.DATA) { log('手表固件不支持'); return; }
+  try {
+    await gatt(() => ch.DATA.startNotifications());
+    if (!ch.DATA.oncharacteristicvaluechanged) await syncData();
+    $('dumpSum').textContent = '准备中…';
+    await write('CMD', 'dump');
+  } catch (e) { log('下载失败：' + e.message); }
+};
+$('btnDumpClear').onclick = async () => {
+  if (!confirm('清除手表上的当机记录？下载过就可以清。')) return;
+  try { await write('CMD', 'dump_clear'); $('dumpBox').style.display = 'none'; log('当机记录已清除'); } catch (e) { log(e.message); }
+};
 
 async function syncTime() { await write('TIME', `${Math.floor(Date.now() / 1000)},${-new Date().getTimezoneOffset()}`); log('已对时'); }
 /* the phone fetches the weather with its own internet and hands it to the watch,
@@ -466,6 +512,12 @@ function showStatus(txt) {
   $('sWifi').innerHTML = s.wifi ? `<span class="chip ok">${esc(s.ssid)}</span>` : (s.nets && s.nets.length ? `<span class="chip">平时关着 · 记住 ${s.nets.length} 个</span>` : '未设定');
   if ('rs' in s) { $('rs').checked = !!s.rs; $('rw').checked = !!s.rw; }
   if ('lk' in s) $('lkNote').textContent = s.lk ? '手表已经有灯光钥匙。' : '在灯光系统里给手表新增一个设备，把钥匙贴在这里。';
+  if (s.ver) $('sVer').textContent = s.ver;
+  if ('rst' in s) {
+    $('sRst').innerHTML = `<span class="chip${BAD_RST.includes(s.rst) ? ' warn' : ''}">${esc(RST[s.rst] || s.rst)}</span>`;
+    $('dumpBox').style.display = s.dump ? 'block' : 'none';
+    if (s.dump && !lastDumpInfo && !dumpRx) $('dumpSum').textContent = '';
+  }
   $('sTime').innerHTML = s.time ? '<span class="chip ok">已对时</span>' : '<span class="chip warn">未对时</span>';
   if (s.nets) {
     $('netList').innerHTML = s.nets.length ? s.nets.map(n => `<div class="it"><span class="k">${esc(n)}${s.wifi && s.ssid === n ? ' <span class="chip ok">已连接</span>' : ''}</span><button class="del" data-n="${encodeURIComponent(n)}">删除</button></div>`).join('') : '<div class="empty">还没有记住任何 WiFi</div>';
