@@ -1,4 +1,4 @@
-# FishWatch 养鱼手表 — firmware (v0.7.11)
+# FishWatch 养鱼手表 — firmware (v0.8.0)
 
 ESP-IDF firmware for the **Waveshare ESP32-S3-Touch-AMOLED-2.06** watch.
 The phone companion page is the `index.html` at the repo root (served by GitHub Pages).
@@ -57,6 +57,19 @@ CMD strings: `find_stop`, `buzz`, `sync`, `wifi_del:<ssid>`, `goal:<n>`, `url:<p
 Watch → phone on CMD: `find`, `find_stop`, `wifi_ok:<ssid>`, `wifi_fail:<ssid>\n<reason>`.
 WIFI writes are tried first and only saved if the watch gets an IP (since 0.7.6).
 STATUS JSON also carries `rst` (last reset reason) and `dump` (a core dump is stored) since 0.7.7.
+0.8.0 adds: 9 NOTIF (write `app\ntitle\ntext`, from the Android app in `../android`), CMD `xz_ota:<url>`
+(小智 server, "" = official) and `radio_url:<url>`; STATUS `xzs` (小智 state) and `xzc` (pending
+activation code). Also standard HID (0x1812, consumer control, bonded) + battery + device-info
+services for the camera shutter.
+
+## 0.8.0 apps
+- 小智 / 翻译 (`xiaozhi.c`): xiaozhi-esp32 protocol — OTA POST → activation code → `<ota>/activate`
+  polling → websocket (Opus 16 kHz up, server rate down), push-to-talk. Vendored `components/opus`,
+  `components/esp_websocket_client`.
+- 音乐 (`app_media.c`): HTTP MP3 radio, Helix decoder (`components/helix_mp3`), resampled to 24 kHz.
+- 遥控拍照 (`app_media.c`, `ble.c`): BLE HID Volume Up = Android camera shutter.
+- 通知 (`notif.c`): popup + last 10, from the Android app; `收通知` keeps BLE on.
+- Fonts: 16/20 px carry GB2312 level 1 (`tools/cjk_common.py`).
 
 ## Crash diagnostics (0.7.7+)
 A panic, an LVGL assert (`components/fw_lv_assert.h` → abort) or the task watchdog (the UI task
