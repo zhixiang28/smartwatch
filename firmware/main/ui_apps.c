@@ -28,7 +28,7 @@ static const app_def_t APPS[] = {
     {"计步", CAT_FIT, &img_icon_st, app_steps, NULL},
     {"计时", CAT_FIT, &img_icon_tm, app_stopwatch, NULL},
     {"专注", CAT_FIT, &img_icon_fo, app_focus, NULL},
-    {"音乐", CAT_MED, &img_icon_mu, NULL, "网络电台，用手表喇叭播放。下一版加入。"},
+    {"音乐", CAT_MED, &img_icon_mu, app_radio, NULL},
     {"录音", CAT_MED, &img_icon_rc, app_recorder, NULL},
     {"遥控拍照", CAT_MED, &img_icon_cm, app_camera, NULL},
     {"闹钟", CAT_LIFE, &img_icon_al, app_alarm, NULL},

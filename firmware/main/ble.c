@@ -287,6 +287,7 @@ static int access_cb(uint16_t conn, uint16_t attr, struct ble_gatt_access_ctxt *
                 store_save();
             }
         }
+        else if (!strncmp(buf, "radio_url:", 10)) { snprintf(g_set.radio_url, sizeof(g_set.radio_url), "%s", buf + 10); store_save(); }
         else if (!strcmp(buf, "lightout")) { g_set.light_person[0] = 0; g_set.light_pin[0] = 0; store_save(); }
         else if (!strncmp(buf, "remind:", 7)) { g_set.remind_sit = buf[7] == '1'; g_set.remind_water = buf[8] == '1'; store_save(); }
         else if (!strncmp(buf, "goal:", 5)) { int g = atoi(buf + 5); if (g >= 1000 && g <= 50000) { g_set.step_goal = g; store_save(); } }

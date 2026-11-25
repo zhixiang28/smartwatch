@@ -57,6 +57,8 @@ typedef struct {
      * checks the PIN with login_by_email before sending, so a wrong PIN is never stored */
     char light_person[40];  /* person uuid, "" = not signed in */
     char light_pin[33];
+    char radio_url[128];    /* custom station from the phone page ("" = none) */
+    uint8_t radio_station;  /* last station played */
 } settings_t;
 
 typedef struct { bool ok; float temp, tmax, tmin; int code, hum; char upd[8]; } weather_t;
@@ -210,6 +212,9 @@ void focus_check(void);
 void app_light(lv_obj_t *root);
 void app_game(lv_obj_t *root);
 void app_camera(lv_obj_t *root);
+void app_radio(lv_obj_t *root);
+bool radio_playing(void);
+void radio_stop(void);
 void reminders_check(void);
 void tank_attention(const char *msg);
 void app_soon_set(const char *name, const char *desc);
