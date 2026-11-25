@@ -129,6 +129,38 @@ static void nets_save(void)
     nvs_close(h);
 }
 
+/* Where we last got online: joining that AP directly (known channel + BSSID) skips the
+ * ~2 s all-channel scan. Kept in NVS so the first join after a reboot is fast too. */
+typedef struct { char ssid[33]; uint8_t bssid[6]; uint8_t ch; } last_ap_t;
+static last_ap_t s_last;
+
+static void last_save(void)
+{
+    nvs_handle_t h;
+    if (nvs_open("wifi", NVS_READWRITE, &h) != ESP_OK) return;
+    nvs_set_blob(h, "last", &s_last, sizeof(s_last));
+    nvs_commit(h);
+    nvs_close(h);
+}
+
+static void last_forget(const char *ssid)
+{
+    if (s_last.ssid[0] && (!ssid || !strcmp(s_last.ssid, ssid))) { memset(&s_last, 0, sizeof(s_last)); last_save(); }
+}
+
+/* called on the WiFi manager task right after we got an IP */
+static void last_record(void)
+{
+    wifi_ap_record_t ap;
+    if (esp_wifi_sta_get_ap_info(&ap) != ESP_OK) return;
+    if (!strcmp(s_last.ssid, g_set.ssid) && !memcmp(s_last.bssid, ap.bssid, 6) && s_last.ch == ap.primary) return;
+    memset(&s_last, 0, sizeof(s_last));
+    strncpy(s_last.ssid, g_set.ssid, 32);
+    memcpy(s_last.bssid, ap.bssid, 6);
+    s_last.ch = ap.primary;
+    last_save();
+}
+
 static void nets_load(void)
 {
     nvs_handle_t h;
@@ -136,6 +168,11 @@ static void nets_load(void)
     if (nvs_open("wifi", NVS_READONLY, &h) == ESP_OK) {
         size_t len = sizeof(s_nets);
         if (nvs_get_blob(h, "nets", s_nets, &len) == ESP_OK) s_nnets = len / sizeof(net_t);
+        nvs_close(h);
+    }
+    if (nvs_open("wifi", NVS_READONLY, &h) == ESP_OK) {
+        size_t len = sizeof(s_last);
+        if (nvs_get_blob(h, "last", &s_last, &len) != ESP_OK || len != sizeof(s_last)) memset(&s_last, 0, sizeof(s_last));
         nvs_close(h);
     }
     if (s_nnets == 0 && g_set.ssid[0]) {           /* migrate the single network from v0.1-v0.5 */
@@ -155,6 +192,7 @@ void net_wifi_add(const char *ssid, const char *pass)
         if (s_nnets == MAX_NETS) { memmove(&s_nets[0], &s_nets[1], sizeof(net_t) * (MAX_NETS - 1)); i = MAX_NETS - 1; }
         else s_nnets++;
     }
+    last_forget(ssid);                              /* new password: don't reuse the old AP hint blindly */
     memset(&s_nets[i], 0, sizeof(net_t));
     strncpy(s_nets[i].ssid, ssid, 32);
     strncpy(s_nets[i].pass, pass, 64);
@@ -167,6 +205,7 @@ void net_wifi_del(const char *ssid)
 {
     for (int i = 0; i < s_nnets; i++) {
         if (strcmp(s_nets[i].ssid, ssid)) continue;
+        last_forget(ssid);
         memmove(&s_nets[i], &s_nets[i + 1], sizeof(net_t) * (s_nnets - i - 1));
         s_nnets--;
         nets_save();
@@ -218,12 +257,17 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
     }
 }
 
-static bool join(int k, int rssi, int timeout_ms)
+static bool join_hint(int k, int rssi, int timeout_ms, const last_ap_t *hint)
 {
     wifi_config_t wc = {0};
     strncpy((char *)wc.sta.ssid, s_nets[k].ssid, sizeof(wc.sta.ssid));
     strncpy((char *)wc.sta.password, s_nets[k].pass, sizeof(wc.sta.password));
     wc.sta.threshold.authmode = s_nets[k].pass[0] ? WIFI_AUTH_WPA_PSK : WIFI_AUTH_OPEN;
+    if (hint) {                                     /* straight to the AP we used last time */
+        wc.sta.channel = hint->ch;
+        wc.sta.bssid_set = true;
+        memcpy(wc.sta.bssid, hint->bssid, 6);
+    }
     esp_wifi_set_config(WIFI_IF_STA, &wc);
     memset(g_set.ssid, 0, sizeof(g_set.ssid));
     strncpy(g_set.ssid, s_nets[k].ssid, sizeof(g_set.ssid) - 1);
@@ -232,13 +276,28 @@ static bool join(int k, int rssi, int timeout_ms)
     ESP_LOGI(TAG, "joining %s (%d dBm)", g_set.ssid, rssi);
     esp_wifi_connect();
     EventBits_t b = xEventGroupWaitBits(s_ev, EV_GOT_IP | EV_DISC, pdTRUE, pdFALSE, pdMS_TO_TICKS(timeout_ms));
-    if (!(b & (EV_GOT_IP | EV_DISC))) snprintf(s_err, sizeof(s_err), "%s 连接超时（拿不到 IP）", g_set.ssid);
-    return (b & EV_GOT_IP) != 0;
+    if (b & EV_GOT_IP) { last_record(); return true; }
+    if (!(b & EV_DISC)) {
+        if (!hint) snprintf(s_err, sizeof(s_err), "%s 连接超时（拿不到 IP）", g_set.ssid);
+        s_leaving = true;                           /* stop the half-done attempt, or the next scan fails */
+        esp_wifi_disconnect();
+        xEventGroupWaitBits(s_ev, EV_DISC, pdTRUE, pdFALSE, pdMS_TO_TICKS(1000));
+    }
+    return false;
 }
+static bool join(int k, int rssi, int timeout_ms) { return join_hint(k, rssi, timeout_ms, NULL); }
 
 static bool try_join(void)
 {
     if (!s_nnets) return false;
+    if (s_last.ssid[0]) {
+        for (int k = 0; k < s_nnets; k++)
+            if (!strcmp(s_nets[k].ssid, s_last.ssid)) {
+                ESP_LOGI(TAG, "fast join %s on ch %d", s_last.ssid, s_last.ch);
+                if (join_hint(k, 0, 6000, &s_last)) return true;
+                break;                              /* moved / AP changed: fall back to a scan */
+            }
+    }
     wifi_scan_config_t sc = { .show_hidden = true };
     if (esp_wifi_scan_start(&sc, true) != ESP_OK) return false;
     uint16_t n = 20;
@@ -268,7 +327,7 @@ static bool try_join(void)
 }
 
 /* WiFi is only switched on while something needs it (time sync, weather, office
- * light, adding a network) and switched off 20 s after the last job finishes. */
+ * light, adding a network) and switched off 45 s after the last job finishes. */
 static void radio_off_cb(void *arg)
 {
     bool off = false;
@@ -302,7 +361,7 @@ void net_wifi_use(bool on)
         radio_up();
     } else if (users_add(-1) == 0 && s_off_timer) {
         esp_timer_stop(s_off_timer);
-        esp_timer_start_once(s_off_timer, 20 * 1000000);
+        esp_timer_start_once(s_off_timer, 45 * 1000000);     /* stays on a while: the next tap needn't wait */
     }
 }
 
@@ -389,7 +448,7 @@ static void run_test(void)
     ESP_LOGI(TAG, "testing %s%s", s_test.ssid, found ? "" : " (hidden?)");
     esp_wifi_connect();
     EventBits_t b = xEventGroupWaitBits(s_ev, EV_GOT_IP, pdTRUE, pdFALSE, pdMS_TO_TICKS(20000));
-    if (b & EV_GOT_IP) { test_done(true, NULL); return; }
+    if (b & EV_GOT_IP) { last_record(); test_done(true, NULL); return; }
 
     int r = s_last_reason;
     s_leaving = true;                                   /* our own give-up is not an error */

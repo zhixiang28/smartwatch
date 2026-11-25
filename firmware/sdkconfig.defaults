@@ -71,3 +71,5 @@ CONFIG_LV_ASSERT_HANDLER_INCLUDE="fw_lv_assert.h"
 # don't need the accelerator. (RSA/ECC big-number hardware stays on; it doesn't use DMA.)
 CONFIG_MBEDTLS_HARDWARE_AES=n
 CONFIG_MBEDTLS_HARDWARE_SHA=n
+# faster WiFi: ask the router for the last IP again (DHCP REQUEST) instead of a full discover
+CONFIG_LWIP_DHCP_RESTORE_LAST_IP=y

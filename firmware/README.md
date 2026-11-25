@@ -1,4 +1,4 @@
-# FishWatch 养鱼手表 — firmware (v0.7.10)
+# FishWatch 养鱼手表 — firmware (v0.7.11)
 
 ESP-IDF firmware for the **Waveshare ESP32-S3-Touch-AMOLED-2.06** watch.
 The phone companion page is the `index.html` at the repo root (served by GitHub Pages).
@@ -31,7 +31,7 @@ esp_lvgl_port, esp_codec_dev (from esp-adf), LVGL **v9.5.0** (its `scripts/` fol
 | `store.c` | NVS settings (tolerates older shorter blobs), SD card, workout CSV |
 | `hw.c` | PMU/RTC/IMU over I2C, motor, buttons, step counter, raise-to-wake |
 | `power.c` | screen timeout/sleep/wake, 500 ms tick (steps, reminders, alarm, weather, NTP), DFS |
-| `net.c` | on-demand WiFi (refcount `net_wifi_use`, 20 s idle off), up to 6 saved networks, NTP, Open-Meteo weather |
+| `net.c` | on-demand WiFi (refcount `net_wifi_use`, 45 s idle off, fast rejoin of the last AP), up to 6 saved networks, NTP, Open-Meteo weather |
 | `ble.c` | NimBLE, started only when user taps pairing; auto-off after 3 min idle |
 | `health.c` | 30-day steps, hourly steps, workout sets, sleep movement; export to phone |
 | `sound.c` | ES8311 synthesized sounds (24 kHz) |
