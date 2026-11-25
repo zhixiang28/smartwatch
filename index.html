@@ -145,6 +145,7 @@
       <div class="it"><span class="k">时间</span><span class="v" id="sTime">--</span></div>
       <div class="it"><span class="k">上次重启</span><span class="v" id="sRst">--</span></div>
       <div class="it"><span class="k">手表固件</span><span class="v" id="sVer">--</span></div>
+      <div class="it" id="memRow" hidden><span class="k">手表内存</span><span class="v" id="sMem">--</span></div>
       <div id="dumpBox" style="display:none;padding:10px 2px 12px">
         <div class="note" style="margin:0 0 8px;color:var(--orange)">手表上次当机，留下了记录。下载后发给开发的人就能查出原因。</div>
         <div class="note" id="dumpSum" style="margin:0 0 10px;font-family:ui-monospace,monospace;font-size:11px;word-break:break-all;white-space:pre-wrap"></div>
@@ -548,6 +549,11 @@ function showStatus(txt) {
     $('xzCode').textContent = s.xzc || '';
   }
   if (s.ver) $('sVer').textContent = s.ver;
+  if ('mi' in s) {   /* firmware 0.8.6+: internal RAM free / largest block / lowest since boot, PSRAM free / largest (KB) */
+    $('memRow').hidden = false;
+    const low = s.mi < 30 || s.mb < 12 || ('pb' in s && s.pb < 300);
+    $('sMem').innerHTML = `<span class="chip${low ? ' warn' : ' ok'}">内部 ${s.mi}K（最大块 ${s.mb}K，最低 ${s.mm}K）${'pf' in s ? ` · 大内存 ${s.pf}K` : ''}</span>`;
+  }
   if ('rst' in s) {
     $('sRst').innerHTML = `<span class="chip${BAD_RST.includes(s.rst) ? ' warn' : ''}">${esc(RST[s.rst] || s.rst)}</span>`;
     $('dumpBox').style.display = s.dump ? 'block' : 'none';
