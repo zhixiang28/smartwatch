@@ -175,6 +175,30 @@
       <div class="it" style="justify-content:flex-end"><button id="btnMrIn" class="sec">登入并存到手表</button></div>
     </div>
     <p class="note" id="mrNote">手机先向 mr 确认 email 和 PIN，对了才存到手表。手表开灯时用这个账号。</p>
+    <div class="hd">小智 AI 助手</div>
+    <div class="card" style="padding:4px 16px">
+      <div class="it"><span class="k">状态</span><span class="v" id="xzSt">--</span></div>
+      <div id="xzAct" hidden style="padding:12px 2px 14px;text-align:center">
+        <div class="note" style="margin:0 0 6px">激活码（在手表打开「小智」才会出现）</div>
+        <div id="xzCode" style="font-size:40px;font-weight:700;letter-spacing:8px;color:var(--teal)"></div>
+        <div class="note" style="margin:8px 0 0">到 <a href="https://xiaozhi.me" target="_blank" rel="noopener" style="color:var(--blue)">xiaozhi.me</a> 登入 → 控制台 → 添加设备 → 输入这 6 位数字。手表会自己等激活完成。</div>
+      </div>
+      <div class="it"><label for="xzOta" class="k">服务器</label><input id="xzOta" placeholder="留空 = 官方 xiaozhi.me" autocomplete="off"><button id="btnXzOta" class="sec" style="height:36px">存</button></div>
+    </div>
+    <p class="note">自己架的小智服务器才要填（填 OTA 地址，例如 https://…/xiaozhi/ota/）。</p>
+
+    <div class="hd">音乐（网络电台）</div>
+    <div class="card" style="padding:4px 16px">
+      <div class="it"><label for="radioUrl" class="k">自订电台</label><input id="radioUrl" placeholder="http://…（MP3 串流）" autocomplete="off"><button id="btnRadio" class="sec" style="height:36px">存</button></div>
+    </div>
+    <p class="note">手表内建 4 个电台，这里可以再加一个。只支持 MP3 串流（.mp3 / Icecast / Shoutcast）。</p>
+
+    <div class="hd">遥控拍照 · 通知</div>
+    <div class="card" style="padding:12px 16px">
+      <div class="note" style="margin:0 0 8px"><b style="color:var(--text)">遥控拍照</b>：手机「设置 → 蓝牙 → 配对新设备」选 FishWatch 配对一次，之后在手表「遥控拍照」按快门，手机相机就会拍照（不用装 App）。</div>
+      <div class="note" style="margin:0"><b style="color:var(--text)">通知</b>：Android 网页读不到通知，要装 <a href="https://github.com/zhixiang28/smartwatch/releases/tag/notify-app" target="_blank" rel="noopener" style="color:var(--blue)">FishWatch 通知 App</a>，再在手表「通知」打开「收通知」。配对码就是手表上的 4 位数。</div>
+    </div>
+
     <div class="hd">其他</div>
     <div class="card" style="padding:4px 16px">
       <div class="it"><label for="goal" class="k">每日步数目标</label><input id="goal" inputmode="numeric" value="8000" style="max-width:90px"><button id="btnGoal" class="sec" style="height:36px">设定</button></div>
@@ -517,6 +541,12 @@ function showStatus(txt) {
   $('sWifi').innerHTML = s.wifi ? `<span class="chip ok">${esc(s.ssid)}</span>` : (s.nets && s.nets.length ? `<span class="chip">平时关着 · 记住 ${s.nets.length} 个</span>` : '未设定');
   if ('rs' in s) { $('rs').checked = !!s.rs; $('rw').checked = !!s.rw; }
   if ('la' in s) mrShow(s.la);
+  if ('xzs' in s) {
+    const XZ = ['没开（在手表打开「小智」）', '打开 WiFi…', '连接服务器…', '等你激活', '建立对话…', '可以说话了', '在听', '想一想', '在说话', '出错了（看手表）'];
+    $('xzSt').textContent = XZ[s.xzs] || '--';
+    $('xzAct').hidden = !s.xzc;
+    $('xzCode').textContent = s.xzc || '';
+  }
   if (s.ver) $('sVer').textContent = s.ver;
   if ('rst' in s) {
     $('sRst').innerHTML = `<span class="chip${BAD_RST.includes(s.rst) ? ' warn' : ''}">${esc(RST[s.rst] || s.rst)}</span>`;
@@ -584,6 +614,13 @@ $('btnGoal').onclick = () => { const g = parseInt($('goal').value); if (g >= 100
 $('btnTime').onclick = () => syncTime().catch(e => log(e.message));
 const sendRemind = () => write('CMD', 'remind:' + ($('rs').checked ? 1 : 0) + ($('rw').checked ? 1 : 0)).then(() => log('提醒已更新')).catch(e => log(e.message));
 $('rs').onchange = sendRemind; $('rw').onchange = sendRemind;
+$('btnXzOta').onclick = () => write('CMD', 'xz_ota:' + $('xzOta').value.trim()).then(() => log('小智服务器已设定' + ($('xzOta').value.trim() ? '' : '为官方'))).catch(e => log(e.message));
+$('btnRadio').onclick = () => {
+  const u = $('radioUrl').value.trim();
+  if (u && !/^https?:\/\//i.test(u)) { log('电台地址要 http:// 或 https:// 开头'); return; }
+  write('CMD', 'radio_url:' + u).then(() => log(u ? '自订电台已存到手表' : '已清除自订电台')).catch(e => log(e.message));
+};
+
 /* ---------- office light: sign in with the mr-tracker account ----------
    The phone checks email + PIN with login_by_email first; only a PIN that works is sent to the
    watch, which then calls light_set(person, pin). A wrong PIN stored on the watch would lock the
