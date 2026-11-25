@@ -56,10 +56,11 @@ static int status_json(char *buf, int len)
     json_esc(ssid, sizeof(ssid), g_set.ssid);
     int n = snprintf(buf, len,
         "{\"ver\":\"%s\",\"auth\":%s,\"batt\":%d,\"chg\":%s,\"wifi\":%s,\"ssid\":\"%s\",\"time\":%s,\"tz\":%d,"
-        "\"hunger\":%d,\"dirt\":%d,\"workouts\":%u,\"total\":%lu,\"steps\":%lu,\"nets\":%s,\"rs\":%d,\"rw\":%d,\"lk\":%s,\"rst\":\"%s\",\"dump\":%s}",
+        "\"hunger\":%d,\"dirt\":%d,\"workouts\":%u,\"total\":%lu,\"steps\":%lu,\"nets\":%s,\"rs\":%d,\"rw\":%d,\"lk\":%s,\"la\":%s,\"rst\":\"%s\",\"dump\":%s}",
         esp_app_get_description()->version, s_authed ? "true" : "false", hw_battery_percent(), hw_charging() ? "true" : "false",
         net_wifi_connected() ? "true" : "false", ssid, net_time_valid() ? "true" : "false", g_set.tz_min,
         (int)g_set.hunger, (int)g_set.dirt, g_set.workouts, (unsigned long)g_set.total_kg, (unsigned long)g_set.steps, nets, g_set.remind_sit, g_set.remind_water, g_set.light_key[0] ? "true" : "false",
+        g_set.light_person[0] && g_set.light_pin[0] ? "true" : "false",
         diag_reset_reason(), diag_has_dump() ? "true" : "false");
     free(nets);
     return n < len ? n : len - 1;
@@ -212,6 +213,16 @@ static int access_cb(uint16_t conn, uint16_t attr, struct ble_gatt_access_ctxt *
         }
         else if (!strncmp(buf, "url:", 4)) { snprintf(g_set.page_url, sizeof(g_set.page_url), "%s", buf + 4); store_save(); ui_kick(); }
         else if (!strncmp(buf, "lightkey:", 9)) { snprintf(g_set.light_key, sizeof(g_set.light_key), "%s", buf + 9); store_save(); }
+        else if (!strncmp(buf, "lightacct:", 10)) {             /* "lightacct:<person uuid>\n<pin>", already checked by the phone */
+            char *nl = strchr(buf + 10, '\n');
+            if (nl) {
+                *nl = 0;
+                snprintf(g_set.light_person, sizeof(g_set.light_person), "%s", buf + 10);
+                snprintf(g_set.light_pin, sizeof(g_set.light_pin), "%s", nl + 1);
+                store_save();
+            }
+        }
+        else if (!strcmp(buf, "lightout")) { g_set.light_person[0] = 0; g_set.light_pin[0] = 0; store_save(); }
         else if (!strncmp(buf, "remind:", 7)) { g_set.remind_sit = buf[7] == '1'; g_set.remind_water = buf[8] == '1'; store_save(); }
         else if (!strncmp(buf, "goal:", 5)) { int g = atoi(buf + 5); if (g >= 1000 && g <= 50000) { g_set.step_goal = g; store_save(); } }
         else if (!strcmp(buf, "buzz")) hw_haptic(400);

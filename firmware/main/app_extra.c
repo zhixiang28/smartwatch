@@ -74,14 +74,24 @@ static void light_job(int ch)
         snprintf(s_l_detail, sizeof(s_l_detail), "WiFi：%s", net_last_error()[0] ? net_last_error() : "还在找网络");
         s_l_err = 1; s_l_busy = false; light_kick(); return;
     }
-    if (ch) {
+    if (ch && g_set.light_person[0] && g_set.light_pin[0]) {
         const char *now = s_l_state[ch - 1];
-        char body[160];
-        snprintf(body, sizeof(body), "{\"p_key\":\"%s\",\"ch\":%d,\"new_state\":\"%s\"}", g_set.light_key, ch, strcmp(now, "ON") ? "ON" : "OFF");
-        int st = http_call("/rest/v1/rpc/device_set_light", body, buf, sizeof(buf));
+        char body[200], pin[70], who[80];
+        json_esc(pin, sizeof(pin), g_set.light_pin);
+        json_esc(who, sizeof(who), g_set.light_person);
+        snprintf(body, sizeof(body), "{\"p_person_id\":\"%s\",\"p_pin\":\"%s\",\"ch\":%d,\"new_state\":\"%s\"}",
+                 who, pin, ch, strcmp(now, "ON") ? "ON" : "OFF");
+        int st = http_call("/rest/v1/rpc/light_set", body, buf, sizeof(buf));
         s_l_err = st == 200 ? 0 : (st >= 400 ? 2 : 1);
-        if (st >= 400) snprintf(s_l_detail, sizeof(s_l_detail), "服务器回应 %d：%.60s", st, buf);
-        ESP_LOGI(TAG, "light set ch%d -> %d %s", ch, st, buf);
+        if (st >= 400 && strstr(buf, "not signed in")) {
+            /* PIN changed or the account is locked. Forget the PIN at once: retrying a wrong PIN
+             * 5 times locks the account (and emails the owner). The phone signs in again. */
+            g_set.light_pin[0] = 0;
+            store_save();
+            ble_notify_status();
+            snprintf(s_l_detail, sizeof(s_l_detail), "mr 的 PIN 不对，请在手机重新设定");
+        } else if (st >= 400) snprintf(s_l_detail, sizeof(s_l_detail), "服务器回应 %d：%.60s", st, buf);
+        ESP_LOGI(TAG, "light set ch%d -> %d %s", ch, st, st == 200 ? buf : "");
     }
     int st = http_call("/rest/v1/smartlight?id=eq.1&select=state,state2", NULL, buf, sizeof(buf));
     if (st == 200) {
@@ -145,7 +155,7 @@ static void light_paint(void)
     }
     const char *msg = "点一下开关";
     if (!net_wifi_count()) msg = "手表还没记住任何 WiFi";
-    else if (!g_set.light_key[0]) msg = "先在手机网页设定灯光钥匙";
+    else if (!g_set.light_person[0] || !g_set.light_pin[0]) msg = "先在手机网页设定 mr 的 PIN";
     else if (s_l_busy) msg = net_wifi_connected() ? "连线中…" : "正在打开 WiFi…";
     else if (s_l_err == 2) msg = s_l_detail[0] ? s_l_detail : "钥匙不对，手表没有权限";
     else if (s_l_err == 1) msg = s_l_detail[0] ? s_l_detail : "连不上灯光服务器";
@@ -154,7 +164,7 @@ static void light_paint(void)
 
 static void light_btn(lv_event_t *e)
 {
-    if (!g_set.light_key[0]) { light_paint(); return; }
+    if (!g_set.light_person[0] || !g_set.light_pin[0]) { light_paint(); return; }
     hw_haptic(20);
     light_run((int)(intptr_t)lv_event_get_user_data(e));
 }

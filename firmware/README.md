@@ -1,4 +1,4 @@
-# FishWatch 养鱼手表 — firmware (v0.7.7)
+# FishWatch 养鱼手表 — firmware (v0.7.8)
 
 ESP-IDF firmware for the **Waveshare ESP32-S3-Touch-AMOLED-2.06** watch.
 The phone companion page is the `index.html` at the repo root (served by GitHub Pages).
@@ -53,7 +53,7 @@ Service `f15a000X-6c2b-4b9a-9d3e-2a1c5e7b8d00`, X =
 7 LOC, 8 DATA (notify JSON lines, ends with `END`).
 CMD strings: `find_stop`, `buzz`, `sync`, `wifi_del:<ssid>`, `goal:<n>`, `url:<page>`,
 `lightkey:<key>`, `remind:XY`, `wx:t,code,max,min,hum`, `dump` (stream the crash dump over DATA),
-`dump_clear`.
+`dump_clear`, `lightacct:<person uuid>\n<pin>` / `lightout` (office light by mr-tracker account, 0.7.8+).
 Watch → phone on CMD: `find`, `find_stop`, `wifi_ok:<ssid>`, `wifi_fail:<ssid>\n<reason>`.
 WIFI writes are tried first and only saved if the watch gets an IP (since 0.7.6).
 STATUS JSON also carries `rst` (last reset reason) and `dump` (a core dump is stored) since 0.7.7.
@@ -70,7 +70,9 @@ python -m esp_coredump info_corefile -t raw -c fishwatch-coredump-....bin releas
 Chrome Web Bluetooth allows one GATT operation at a time — the phone page queues them.
 
 ## Office light
-`app_extra.c` calls Supabase RPC `device_set_light(p_key, ch, new_state)` over HTTPS
-(esp_crt_bundle) with the project's publishable key; the per-device key is set from the phone
-(`lightkey:`). Open issue: as of v0.7.1 the watch's requests never reach Supabase
+Since 0.7.8 `app_extra.c` calls Supabase RPC `light_set(p_person_id, p_pin, ch, new_state)` over HTTPS
+(esp_crt_bundle) with the user's mr-tracker account. The phone page checks email + PIN with
+`login_by_email` first and only then sends `lightacct:`; on a `not signed in` reply the watch
+forgets the PIN at once (5 wrong PINs lock the account). The old per-device key (`lightkey:`,
+`device_set_light`) is no longer used by the phone page. Open issue: as of v0.7.1 the watch's requests never reach Supabase
 (weather over plain HTTP works) — v0.7.1 shows the exact error under the buttons to diagnose.

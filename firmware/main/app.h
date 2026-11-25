@@ -53,6 +53,10 @@ typedef struct {
     char light_key[64];     /* device key for the office light (Supabase device_set_light) */
     uint8_t remind_sit, remind_water;
     uint16_t game_best;
+    /* office light by the user's mr-tracker account (light_set(p_person_id, p_pin)); the phone
+     * checks the PIN with login_by_email before sending, so a wrong PIN is never stored */
+    char light_person[40];  /* person uuid, "" = not signed in */
+    char light_pin[33];
 } settings_t;
 
 typedef struct { bool ok; float temp, tmax, tmin; int code, hum; char upd[8]; } weather_t;
