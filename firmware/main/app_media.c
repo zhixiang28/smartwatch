@@ -141,6 +141,114 @@ static char s_resolved[16][128];         /* built-in stations: address found in 
 static int rb_get(const char *path, char *buf, int cap);
 static bool rb_playable(void *station_json, const char **url);
 static void rb_lookup(const char *q, const char *cc, char *out, int outlen);
+/* ---- stream client: plain HTTP/1.0 over esp-tls (http or https). esp_http_client can't parse the
+ * "ICY 200 OK" reply SHOUTcast servers send, and doesn't hand back response headers (Location for
+ * StreamTheWorld's 302s, Content-Type for AAC vs MP3), so streams are opened by hand here. ---- */
+#include "esp_tls.h"
+#include <strings.h>
+#include <sys/socket.h>
+typedef struct { esp_tls_t *tls; char hdr[3072]; int pre_off, pre; } rs_t;
+
+static void rs_close(rs_t *r) { if (r->tls) { esp_tls_conn_destroy(r->tls); r->tls = NULL; } }
+
+static const char *hdr_val(const char *h, const char *name)       /* value of "Name:" (case-insensitive) */
+{
+    size_t n = strlen(name);
+    for (const char *p = h; p && *p; p = strstr(p, "\r\n") ? strstr(p, "\r\n") + 2 : NULL) {
+        if (!strncasecmp(p, name, n) && p[n] == ':') { p += n + 1; while (*p == ' ') p++; return p; }
+    }
+    return NULL;
+}
+
+/* returns the status (200 = streaming, rs->tls open), or <= 0 with s_rd_why set */
+static int rs_open(char *url, rs_t *rs, int gen)
+{
+    for (int hop = 0; hop < 5 && gen == s_rd_gen; hop++) {
+        bool https = !strncmp(url, "https://", 8);
+        const char *h = strstr(url, "://");
+        if (!h) { snprintf(s_rd_why, sizeof(s_rd_why), "网址不对"); return -1; }
+        h += 3;
+        char host[96];
+        int port = https ? 443 : 80;
+        const char *path = strchr(h, '/');
+        int hl = path ? path - h : (int)strlen(h);
+        if (hl >= (int)sizeof(host)) hl = sizeof(host) - 1;
+        memcpy(host, h, hl); host[hl] = 0;
+        char *colon = strchr(host, ':');
+        if (colon) { *colon = 0; port = atoi(colon + 1); }
+        if (!path) path = "/";
+        esp_tls_cfg_t cfg = { .timeout_ms = 8000, .is_plain_tcp = !https };
+        if (https) cfg.crt_bundle_attach = esp_crt_bundle_attach;
+        rs->tls = esp_tls_init();
+        if (!rs->tls) { snprintf(s_rd_why, sizeof(s_rd_why), "内存不足"); return -1; }
+        int ok = 0;
+        for (int t = 0; t < 2 && ok != 1 && gen == s_rd_gen; t++) {
+            ok = esp_tls_conn_new_sync(host, strlen(host), port, &cfg, rs->tls);
+            if (ok != 1) {
+                rs_close(rs);
+                snprintf(s_rd_why, sizeof(s_rd_why), "连不上 %.40s", host);
+                vTaskDelay(pdMS_TO_TICKS(800));
+                rs->tls = esp_tls_init();
+                if (!rs->tls) return -1;
+            }
+        }
+        if (ok != 1) { rs_close(rs); return -1; }
+        int fd = -1;
+        if (esp_tls_get_conn_sockfd(rs->tls, &fd) == ESP_OK && fd >= 0) {
+            struct timeval tv = { .tv_sec = 15 };
+            setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        }
+        char req[512];
+        int n = snprintf(req, sizeof(req), "GET %s HTTP/1.0\r\nHost: %s\r\nUser-Agent: Mozilla/5.0 (Linux; Android 14) FishWatch\r\n"
+                         "Accept: */*\r\nIcy-MetaData: 0\r\nConnection: close\r\n\r\n", path, host);
+        for (int off = 0; off < n;) {
+            int w = esp_tls_conn_write(rs->tls, req + off, n - off);
+            if (w <= 0) { rs_close(rs); snprintf(s_rd_why, sizeof(s_rd_why), "送不出请求"); return -1; }
+            off += w;
+        }
+        /* read until the blank line that ends the headers; anything after it is already audio */
+        int len = 0;
+        char *end = NULL;
+        while (len < (int)sizeof(rs->hdr) - 1) {
+            int r = esp_tls_conn_read(rs->tls, rs->hdr + len, sizeof(rs->hdr) - 1 - len);
+            if (r <= 0) break;
+            len += r;
+            rs->hdr[len] = 0;
+            if ((end = strstr(rs->hdr, "\r\n\r\n"))) break;
+        }
+        if (!end) { rs_close(rs); snprintf(s_rd_why, sizeof(s_rd_why), "电台没有回应"); return -1; }
+        *end = 0;
+        rs->pre_off = end + 4 - rs->hdr;
+        rs->pre = len - rs->pre_off;
+        const char *sp = strchr(rs->hdr, ' ');           /* "HTTP/1.1 200 OK" or "ICY 200 OK" */
+        int status = sp ? atoi(sp + 1) : 0;
+        if (status >= 301 && status <= 308) {
+            const char *loc = hdr_val(strstr(rs->hdr, "\r\n") ? strstr(rs->hdr, "\r\n") + 2 : "", "Location");
+            char nu[256];
+            if (loc) {
+                int ll = strcspn(loc, "\r\n");
+                if (loc[0] == '/') snprintf(nu, sizeof(nu), "%s://%s:%d%.*s", https ? "https" : "http", host, port, ll, loc);   /* relative */
+                else snprintf(nu, sizeof(nu), "%.*s", ll, loc);
+            }
+            rs_close(rs);
+            if (!loc) return status;
+            ESP_LOGI(RTAG, "redirect -> %s", nu);
+            snprintf(url, 160, "%s", nu);
+            if (strlen(nu) >= 160) { snprintf(s_rd_why, sizeof(s_rd_why), "转址太长"); return -1; }
+            continue;
+        }
+        if (status != 200) { rs_close(rs); return status ? status : -1; }
+        const char *ct = hdr_val(strstr(rs->hdr, "\r\n") ? strstr(rs->hdr, "\r\n") + 2 : "", "Content-Type");
+        char ctb[48] = "?";
+        if (ct) snprintf(ctb, sizeof(ctb), "%.*s", (int)strcspn(ct, "\r\n"), ct);
+        s_rd_aac = strcasestr(ctb, "aac") || strstr(url, ".aac") || strstr(url, "AAC") || strcasestr(ctb, "mp4a");
+        ESP_LOGI(RTAG, "stream %s (%s) %s", s_rd_aac ? "AAC" : "MP3", ctb, url);
+        return 200;
+    }
+    snprintf(s_rd_why, sizeof(s_rd_why), "转址太多次");
+    return -1;
+}
+
 static void reader_task(void *arg)
 {
     char *buf = heap_caps_malloc(4096, MALLOC_CAP_SPIRAM);
@@ -159,64 +267,42 @@ static void reader_task(void *arg)
             if (!s_resolved[st_i][0]) rb_lookup(STATIONS[st_i].q, STATIONS[st_i].cc, s_resolved[st_i], sizeof(s_resolved[st_i]));
             if (s_resolved[st_i][0]) snprintf(url, sizeof(url), "%s", s_resolved[st_i]);
         }
-        esp_http_client_handle_t c = NULL;
-        int status = 0;
-        for (int hop = 0; hop < 4 && gen == s_rd_gen; hop++) {        /* follow up to 3 redirects */
-            esp_http_client_config_t cfg = { .url = url, .timeout_ms = 8000, .buffer_size = 2048,
-                                             .crt_bundle_attach = esp_crt_bundle_attach, .disable_auto_redirect = true };
-            c = esp_http_client_init(&cfg);
-            if (!c) break;
-            esp_http_client_set_header(c, "Icy-MetaData", "0");
-            esp_err_t oe = ESP_FAIL;
-            for (int t = 0; t < 3 && gen == s_rd_gen; t++) {
-                if ((oe = esp_http_client_open(c, 0)) == ESP_OK) break;
-                net_err_text(c, oe, s_rd_why, sizeof(s_rd_why));
-                esp_http_client_close(c);
-                vTaskDelay(pdMS_TO_TICKS(800 * (t + 1)));
-            }
-            if (oe != ESP_OK) { esp_http_client_cleanup(c); c = NULL; break; }
-            esp_http_client_fetch_headers(c);
-            status = esp_http_client_get_status_code(c);
-            if (status == 200) {
-                char *ct = NULL;
-                esp_http_client_get_header(c, "Content-Type", &ct);
-                s_rd_aac = (ct && strstr(ct, "aac")) || strstr(url, ".aac") || strstr(url, "AAC");
-                ESP_LOGI(RTAG, "stream %s (%s)", s_rd_aac ? "AAC" : "MP3", ct ? ct : "?");
-            }
-            if (status >= 301 && status <= 308) {
-                char *loc = NULL;
-                esp_http_client_get_header(c, "Location", &loc);
-                if (loc) snprintf(url, sizeof(url), "%s", loc);
-                esp_http_client_close(c); esp_http_client_cleanup(c); c = NULL;
-                if (!loc) break;
-                continue;
-            }
-            break;
+        /* try the directory's address first, then the built-in fallback */
+        static rs_t rs;                                     /* one reader: keep the 3 KB header buffer off the stack */
+        memset(&rs, 0, sizeof(rs));
+        int status = rs_open(url, &rs, gen);
+        if (status != 200 && st_i < N_BUILTIN && strcmp(url, STATIONS[st_i].url) && gen == s_rd_gen) {
+            ESP_LOGW(RTAG, "%s failed (%d), trying fallback", url, status);
+            s_resolved[st_i][0] = 0;
+            snprintf(url, sizeof(url), "%s", STATIONS[st_i].url);
+            status = rs_open(url, &rs, gen);
         }
-        if (!c || status != 200) {
+        if (status != 200) {
             char m[64];
-            if (status) snprintf(m, sizeof(m), "电台连不上（%d）", status);
+            if (status > 0) snprintf(m, sizeof(m), "电台连不上（%d）", status);
             else snprintf(m, sizeof(m), "电台连不上：%s", s_rd_why);
             rd_fail(m);
-            if (c) { esp_http_client_close(c); esp_http_client_cleanup(c); }
             net_wifi_use(false);
             continue;
+        }
+        if (rs.pre > 0) {                                   /* audio that came in with the headers */
+            if (s_rd_started == gen) xStreamBufferSend(s_rd_sb, rs.hdr + rs.pre_off, rs.pre, pdMS_TO_TICKS(500));
         }
         if (s_rd_started != gen) {                          /* fresh start (not a reconnect mid-play) */
             s_rd_started = gen;
             s_rd_state = 3;
             xStreamBufferReset(s_rd_sb);
+            if (rs.pre > 0) xStreamBufferSend(s_rd_sb, rs.hdr + rs.pre_off, rs.pre, pdMS_TO_TICKS(500));
             xTaskNotifyGive(s_rd_decoder);
         }
         while (s_rd_play && gen == s_rd_gen) {
-            int r = esp_http_client_read(c, buf, 4096);
+            int r = esp_tls_conn_read(rs.tls, buf, 4096);
             if (r <= 0) break;                          /* dropped: reconnect below while the buffer plays */
             for (int off = 0; off < r && s_rd_play && gen == s_rd_gen;)
                 off += xStreamBufferSend(s_rd_sb, buf + off, r - off, pdMS_TO_TICKS(500));
             s_rd_drops = 0;
         }
-        esp_http_client_close(c);
-        esp_http_client_cleanup(c);
+        rs_close(&rs);
         net_wifi_use(false);
         if (s_rd_play && gen == s_rd_gen) {               /* still wanted: connect again */
             if (++s_rd_drops <= 8) { vTaskDelay(pdMS_TO_TICKS(500)); xTaskNotifyGive(s_rd_reader); continue; }
@@ -310,7 +396,7 @@ static bool rd_tasks(void)
     if (s_rd_decoder) return true;
     s_rd_sb = xStreamBufferCreateWithCaps(RD_BUF, 1, MALLOC_CAP_SPIRAM);
     if (!s_rd_sb) return false;
-    if (xTaskCreateWithCaps(reader_task, "radio_rd", 6144, NULL, 4, &s_rd_reader, MALLOC_CAP_SPIRAM) != pdPASS) return false;
+    if (xTaskCreateWithCaps(reader_task, "radio_rd", 12288, NULL, 4, &s_rd_reader, MALLOC_CAP_SPIRAM) != pdPASS) return false;
     if (xTaskCreateWithCaps(decoder_task, "radio_dec", 12288, NULL, 5, &s_rd_decoder, MALLOC_CAP_SPIRAM) != pdPASS) return false;
     return true;
 }
