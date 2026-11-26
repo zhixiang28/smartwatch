@@ -353,3 +353,97 @@ void app_radio(lv_obj_t *root)
     s_rd_tm = lv_timer_create(rd_paint, 500, NULL);
     g_app_close = rd_close;
 }
+
+/* ---------------- mini player: tap the music icon (watch face or the pill on top) ---------------- */
+static lv_obj_t *s_mini, *s_mini_name, *s_mini_st, *s_mini_play, *s_mini_vol;
+static lv_timer_t *s_mini_tm;
+
+static void mini_paint(lv_timer_t *t)
+{
+    if (!s_mini) return;
+    if (g_set.radio_station >= rd_count()) g_set.radio_station = 0;
+    lv_label_set_text(s_mini_name, rd_name(g_set.radio_station));
+    static const char *ST[] = {"已停止", "打开 WiFi…", "连接电台…", "缓冲中…", "播放中", ""};
+    lv_label_set_text(s_mini_st, s_rd_state == 5 ? s_rd_err : ST[s_rd_state]);
+    lv_label_set_text(lv_obj_get_child(s_mini_play, 0), s_rd_play ? LV_SYMBOL_PAUSE : LV_SYMBOL_PLAY);
+    lv_label_set_text_fmt(s_mini_vol, "音量 %d", g_set.volume);
+}
+static void mini_close(lv_event_t *e)
+{
+    if (s_mini_tm) { lv_timer_delete(s_mini_tm); s_mini_tm = NULL; }
+    if (s_mini) { lv_obj_delete(s_mini); s_mini = NULL; }
+    store_save();                                       /* station + volume */
+}
+static void mini_toggle(lv_event_t *e) { if (s_rd_play) radio_stop(); else radio_start(); mini_paint(NULL); rd_paint(NULL); }
+static void mini_step(lv_event_t *e)
+{
+    int d = (int)(intptr_t)lv_event_get_user_data(e), n = rd_count();
+    g_set.radio_station = (g_set.radio_station + d + n) % n;
+    if (s_rd_play) { radio_stop(); radio_start(); }
+    mini_paint(NULL); rd_paint(NULL);
+}
+static void mini_vol(lv_event_t *e)
+{
+    int v = g_set.volume + (int)(intptr_t)lv_event_get_user_data(e);
+    g_set.volume = v < 0 ? 0 : v > 100 ? 100 : v;
+    sound_set_volume(g_set.volume);
+    mini_paint(NULL); rd_paint(NULL);
+}
+static lv_obj_t *mini_btn(lv_obj_t *p, const char *sym, uint32_t bg, uint32_t fg, int w, int x, int y, lv_event_cb_t cb, intptr_t ud)
+{
+    lv_obj_t *b = lv_button_create(p);
+    lv_obj_set_size(b, w, 56);
+    lv_obj_set_pos(b, x, y);
+    lv_obj_set_style_radius(b, 28, 0);
+    lv_obj_set_style_shadow_width(b, 0, 0);
+    lv_obj_set_style_bg_color(b, lv_color_hex(bg), 0);
+    lv_obj_t *l = lv_label_create(b);
+    lv_obj_set_style_text_font(l, (unsigned char)sym[0] == 0xEF ? &lv_font_montserrat_14 : &font_cn20, 0);   /* LV_SYMBOL_* live in U+F000.. */
+    lv_obj_set_style_text_color(l, lv_color_hex(fg), 0);
+    lv_label_set_text(l, sym);
+    lv_obj_center(l);
+    lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, (void *)ud);
+    return b;
+}
+
+void radio_mini_open(void)
+{
+    if (s_mini) { mini_close(NULL); return; }           /* second tap closes it */
+    power_wake();
+    /* dimmed backdrop: tapping outside the card closes it */
+    s_mini = lv_obj_create(lv_layer_top());
+    lv_obj_set_size(s_mini, SCR_W, SCR_H);
+    lv_obj_set_style_bg_color(s_mini, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(s_mini, LV_OPA_60, 0);
+    lv_obj_set_style_border_width(s_mini, 0, 0);
+    lv_obj_set_style_radius(s_mini, 0, 0);
+    lv_obj_remove_flag(s_mini, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(s_mini, mini_close, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *c = lv_obj_create(s_mini);
+    lv_obj_set_size(c, 380, 250);
+    lv_obj_align(c, LV_ALIGN_TOP_MID, 0, 34);
+    lv_obj_set_style_bg_color(c, lv_color_hex(0x2C2C2E), 0);
+    lv_obj_set_style_radius(c, 30, 0);
+    lv_obj_set_style_border_width(c, 0, 0);
+    lv_obj_set_style_pad_all(c, 0, 0);
+    lv_obj_remove_flag(c, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(c, LV_OBJ_FLAG_CLICKABLE);          /* taps on the card don't reach the backdrop */
+    s_mini_name = ui_label(c, &font_cn20, C_TEXT, "");
+    lv_obj_set_width(s_mini_name, 340);
+    lv_obj_set_style_text_align(s_mini_name, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(s_mini_name, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    lv_obj_align(s_mini_name, LV_ALIGN_TOP_MID, 0, 18);
+    s_mini_st = ui_label(c, &font_cn16, 0xA1A1AA, "");
+    lv_obj_set_width(s_mini_st, 340);
+    lv_obj_set_style_text_align(s_mini_st, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(s_mini_st, LV_ALIGN_TOP_MID, 0, 50);
+    mini_btn(c, LV_SYMBOL_PREV, 0x3A3A3C, 0xF9A8D4, 100, 20, 86, mini_step, -1);
+    s_mini_play = mini_btn(c, LV_SYMBOL_PLAY, 0xEC4899, 0x1A0A12, 120, 130, 86, mini_toggle, 0);
+    mini_btn(c, LV_SYMBOL_NEXT, 0x3A3A3C, 0xF9A8D4, 100, 260, 86, mini_step, 1);
+    mini_btn(c, "−", 0x3A3A3C, 0xF9A8D4, 80, 20, 168, mini_vol, -10);
+    s_mini_vol = ui_label(c, &font_cn20, C_TEXT, "");
+    lv_obj_align(s_mini_vol, LV_ALIGN_TOP_MID, 0, 182);
+    mini_btn(c, "+", 0x3A3A3C, 0xF9A8D4, 80, 280, 168, mini_vol, 10);
+    mini_paint(NULL);
+    s_mini_tm = lv_timer_create(mini_paint, 500, NULL);
+}

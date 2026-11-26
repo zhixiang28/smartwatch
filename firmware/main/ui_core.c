@@ -258,6 +258,7 @@ void ui_status_changed(void)
 /* Small pill at the top of every app screen: WiFi in use / radio playing. (The watch face shows
  * the same two icons next to Bluetooth and the battery.) */
 static lv_obj_t *s_act, *s_act_wifi, *s_act_music;
+static void act_clicked(lv_event_t *e) { if (radio_playing()) radio_mini_open(); }   /* tap the ♪: mini player */
 static void activity_tick(lv_timer_t *t)
 {
     bool w = net_wifi_busy(), m = radio_playing();
@@ -281,7 +282,9 @@ static void activity_create(void)
     lv_obj_set_flex_flow(s_act, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(s_act, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_column(s_act, 8, 0);
-    lv_obj_remove_flag(s_act, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_remove_flag(s_act, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_ext_click_area(s_act, 14);
+    lv_obj_add_event_cb(s_act, act_clicked, LV_EVENT_CLICKED, NULL);
     s_act_wifi = ui_label(s_act, &lv_font_montserrat_14, 0x5EEAD4, LV_SYMBOL_WIFI);
     s_act_music = ui_label(s_act, &lv_font_montserrat_14, 0xF472B6, LV_SYMBOL_AUDIO);
     lv_obj_add_flag(s_act, LV_OBJ_FLAG_HIDDEN);

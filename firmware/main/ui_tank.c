@@ -104,6 +104,8 @@ static void update_clock(void)
     if (radio_playing()) lv_obj_remove_flag(s_music, LV_OBJ_FLAG_HIDDEN); else lv_obj_add_flag(s_music, LV_OBJ_FLAG_HIDDEN);
 }
 
+static void music_clicked(lv_event_t *e) { radio_mini_open(); }
+
 static void drop_food(int cx)
 {
     if (is_night()) return;
@@ -385,7 +387,9 @@ lv_obj_t *tank_create(void)
     lv_obj_add_event_cb(st, status_clicked, LV_EVENT_CLICKED, NULL);
     s_music = ui_label(st, &lv_font_montserrat_14, 0xF472B6, LV_SYMBOL_AUDIO);   /* radio playing */
     s_wifi = ui_label(st, &lv_font_montserrat_14, 0x5EEAD4, LV_SYMBOL_WIFI);     /* network in use */
-    lv_obj_add_flag(s_music, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_music, LV_OBJ_FLAG_HIDDEN | LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_ext_click_area(s_music, 18);
+    lv_obj_add_event_cb(s_music, music_clicked, LV_EVENT_CLICKED, NULL);
     lv_obj_add_flag(s_wifi, LV_OBJ_FLAG_HIDDEN);
     s_bt = ui_icon(st, &img_icon_bt, 0x5A6B68);
     lv_image_set_scale(s_bt, 110);

@@ -20,9 +20,11 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
+#include "freertos/semphr.h"
 #include "freertos/event_groups.h"
 #include "freertos/idf_additions.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "esp_mac.h"
 #include "esp_random.h"
 #include "esp_heap_caps.h"
@@ -51,6 +53,11 @@ static portMUX_TYPE s_txt_mux = portMUX_INITIALIZER_UNLOCKED;
 static volatile bool s_want;                  /* an app wants the session */
 static volatile int s_n_tx, s_n_rx;          /* voice frames sent / reply frames received (shown small) */
 static char s_last[40];                       /* last message type from the server */
+static volatile bool s_auto;                  /* 小智: hands-free (server detects the end of a sentence) */
+static volatile bool s_paused;                /* hands-free paused by a tap (or after 2 min of silence) */
+static volatile bool s_relisten;              /* 小智 finished talking: listen again once the speaker is quiet */
+static volatile bool s_spk_busy;
+static int64_t s_listen_since;
 static volatile int s_mode;                   /* 0 chat, 1 translate */
 static volatile bool s_need_save;
 static volatile bool s_mic_on, s_play;
@@ -62,7 +69,12 @@ static EventGroupHandle_t s_ev;
 #define EV_HELLO     BIT1
 #define EV_CLOSED    BIT2
 static QueueHandle_t s_rxq;                   /* opus packets from the server (pkt_t *) */
-static QueueHandle_t s_txq;                   /* mic packets held while (re)connecting */
+static QueueHandle_t s_txq;                   /* mic packets: the sender task sends them in order */
+static SemaphoreHandle_t s_wsl;               /* guards s_ws against being destroyed mid-send */
+static volatile bool s_stop_pending;          /* send "listen stop" once every queued packet is out */
+static volatile bool s_mic_busy;              /* the mic loop is still recording */
+static volatile int s_n_fail;
+static char s_close_why[48];                   /* mic packets held while (re)connecting */
 static volatile bool s_listening;             /* "listen start" has been sent on this connection */
 static volatile bool s_want_listen;           /* the button is held */
 static volatile bool s_lost;                  /* server closed an idle connection: reconnect on the next press */
@@ -233,6 +245,11 @@ static void on_json(const char *data, size_t len)
         const char *t = cJSON_GetStringValue(cJSON_GetObjectItem(j, "text"));
         if (t) set_txt(s_user, sizeof(s_user), t);
         if (s_st == XZ_LISTEN || s_st == XZ_READY) s_st = XZ_THINK;
+        if (s_auto && s_mode == 0) {                      /* the server heard a sentence: mic off until 小智 has answered */
+            s_mic_on = false;
+            s_listening = false;
+            s_listen_since = esp_timer_get_time() / 1000;
+        }
         if (s_mode == 1 && t && t[0] && s_xl) {          /* 翻译: we only want the transcript */
             set_txt(s_xl_text, sizeof(s_xl_text), t);
             xTaskNotifyGive(s_xl);
@@ -241,12 +258,17 @@ static void on_json(const char *data, size_t len)
         /* 翻译 ignores 小智's own reply (the translator task aborts it) */
     } else if (!strcmp(type, "tts")) {
         const char *state = cJSON_GetStringValue(cJSON_GetObjectItem(j, "state"));
-        if (state && !strcmp(state, "start")) { s_play = true; if (s_st != XZ_LISTEN) s_st = XZ_SPEAK; }
+        if (state && !strcmp(state, "start")) {
+            if (s_auto) { s_mic_on = false; s_listening = false; }   /* no echo cancelling: don't let 小智 hear itself */
+            s_play = true;
+            if (s_st != XZ_LISTEN || s_auto) s_st = XZ_SPEAK;
+        }
         else if (state && !strcmp(state, "sentence_start")) {
             const char *t = cJSON_GetStringValue(cJSON_GetObjectItem(j, "text"));
             if (t) set_txt(s_bot, sizeof(s_bot), t);
         } else if (state && !strcmp(state, "stop")) {
             if (s_st == XZ_SPEAK || s_st == XZ_THINK) s_st = XZ_READY;
+            if (s_auto) s_relisten = true;
         }
     }
     else if (!strcmp(type, "mcp") && s_mcpq) {           /* device tools (lights): handled on the MCP task */
@@ -261,9 +283,21 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
     esp_websocket_event_data_t *d = data;
     switch (id) {
-    case WEBSOCKET_EVENT_CONNECTED: xEventGroupSetBits(s_ev, EV_CONNECTED); break;
+    case WEBSOCKET_EVENT_CONNECTED: s_close_why[0] = 0; xEventGroupSetBits(s_ev, EV_CONNECTED); break;
+    case WEBSOCKET_EVENT_ERROR:
     case WEBSOCKET_EVENT_DISCONNECTED:
-    case WEBSOCKET_EVENT_CLOSED: xEventGroupSetBits(s_ev, EV_CLOSED); break;
+    case WEBSOCKET_EVENT_CLOSED:
+        if (d) {
+            const esp_websocket_error_codes_t *er = &d->error_handle;
+            if (d->close_status_code) snprintf(s_close_why, sizeof(s_close_why), "服务器关闭 %d", d->close_status_code);
+            else if (er->esp_transport_sock_errno) snprintf(s_close_why, sizeof(s_close_why), "网络断 errno %d", er->esp_transport_sock_errno);
+            else if (er->esp_tls_last_esp_err) snprintf(s_close_why, sizeof(s_close_why), "加密 0x%x/-0x%x", (unsigned)er->esp_tls_last_esp_err, -er->esp_tls_stack_err);
+            else if (!s_close_why[0]) snprintf(s_close_why, sizeof(s_close_why), "断线（事件 %d）", (int)id);
+            ESP_LOGW(TAG, "ws event %d: close %d errno %d tls 0x%x/%d hs %d", (int)id, d->close_status_code, er->esp_transport_sock_errno,
+                     (unsigned)er->esp_tls_last_esp_err, er->esp_tls_stack_err, er->esp_ws_handshake_status_code);
+        }
+        if (id != WEBSOCKET_EVENT_ERROR) xEventGroupSetBits(s_ev, EV_CLOSED);
+        break;
     case WEBSOCKET_EVENT_DATA:
         if (d->op_code == 0x1 || (d->op_code == 0x0 && s_txt_len)) {          /* text (maybe fragmented) */
             if (d->payload_offset == 0) s_txt_len = 0;
@@ -284,13 +318,17 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t id, void *data)
     }
 }
 
+static int ws_send(bool bin, const char *d, int n, int ms);
 static void ws_close(void)
 {
     if (!s_ws) return;
     s_mic_on = false;
-    esp_websocket_client_close(s_ws, pdMS_TO_TICKS(2000));
-    esp_websocket_client_destroy(s_ws);
+    xSemaphoreTake(s_wsl, portMAX_DELAY);
+    esp_websocket_client_handle_t w = s_ws;
     s_ws = NULL;
+    xSemaphoreGive(s_wsl);
+    esp_websocket_client_close(w, pdMS_TO_TICKS(2000));
+    esp_websocket_client_destroy(w);
 }
 
 static bool ws_open(void)
@@ -319,7 +357,7 @@ static bool ws_open(void)
     char hello[200];
     int n = snprintf(hello, sizeof(hello), "{\"type\":\"hello\",\"version\":1,\"features\":{\"mcp\":true},\"transport\":\"websocket\","
                      "\"audio_params\":{\"format\":\"opus\",\"sample_rate\":16000,\"channels\":1,\"frame_duration\":60}}");
-    esp_websocket_client_send_text(s_ws, hello, n, pdMS_TO_TICKS(3000));
+    ws_send(false, hello, n, 3000);
     b = xEventGroupWaitBits(s_ev, EV_HELLO | EV_CLOSED, pdFALSE, pdFALSE, pdMS_TO_TICKS(10000));
     if (!(b & EV_HELLO)) {
         ws_close();
@@ -332,27 +370,81 @@ static bool ws_open(void)
     return true;
 }
 
+static int ws_send(bool bin, const char *d, int n, int ms)
+{
+    int r = -1;
+    if (!s_wsl || xSemaphoreTake(s_wsl, pdMS_TO_TICKS(ms + 500)) != pdTRUE) return -1;
+    if (s_ws && esp_websocket_client_is_connected(s_ws))
+        r = bin ? esp_websocket_client_send_bin(s_ws, d, n, pdMS_TO_TICKS(ms)) : esp_websocket_client_send_text(s_ws, d, n, pdMS_TO_TICKS(ms));
+    xSemaphoreGive(s_wsl);
+    return r;
+}
+
 static void send_json(const char *fmt, const char *a)
 {
-    if (!s_ws || !esp_websocket_client_is_connected(s_ws)) return;
     char m[600];
     int n = snprintf(m, sizeof(m), fmt, s_session, a ? a : "");
-    esp_websocket_client_send_text(s_ws, m, n, pdMS_TO_TICKS(2000));
+    ws_send(false, m, n, 2000);
 }
 
 /* ---------------- control task ---------------- */
 static void send_listen_start(void)
 {
     send_json("{\"session_id\":\"%s\",\"type\":\"listen\",\"state\":\"start\",\"mode\":\"manual\"%s}", NULL);
-    /* audio recorded while connecting goes out first */
-    pkt_t *p;
-    for (int pass = 0; pass < 2; pass++) {             /* again after the flag: the mic may queue one meanwhile */
-        while (xQueueReceive(s_txq, &p, 0) == pdTRUE) {
-            if (s_ws && esp_websocket_client_send_bin(s_ws, (const char *)p->d, p->len, pdMS_TO_TICKS(500)) > 0) s_n_tx++;
-            free(p);
-        }
-        s_listening = true;
+    s_listening = true;                 /* the sender task now sends what the mic queued, in order */
+}
+
+/* The only task that sends audio: the mic just queues packets, so a slow network never stalls
+ * the recording, and "listen stop" goes out only after the last packet. */
+static bool ws_up(void)
+{
+    bool up = false;
+    if (s_wsl && xSemaphoreTake(s_wsl, pdMS_TO_TICKS(100)) == pdTRUE) {
+        up = s_ws && esp_websocket_client_is_connected(s_ws);
+        xSemaphoreGive(s_wsl);
     }
+    return up;
+}
+
+static void tx_task(void *arg)
+{
+    for (;;) {
+        if (!s_listening || !ws_up()) { vTaskDelay(pdMS_TO_TICKS(30)); continue; }
+        pkt_t *p;
+        if (xQueuePeek(s_txq, &p, pdMS_TO_TICKS(30)) == pdTRUE) {
+            if (ws_send(true, (const char *)p->d, p->len, 1500) > 0) {
+                s_n_tx++;
+                if (xQueueReceive(s_txq, &p, 0) == pdTRUE) free(p);
+            } else if (ws_up()) {                       /* connected but the send failed: drop this one */
+                s_n_fail++;
+                if (xQueueReceive(s_txq, &p, 0) == pdTRUE) free(p);
+            }                                           /* not connected: keep it for after the reconnect */
+        } else if (s_stop_pending && !s_mic_on && !s_mic_busy) {
+            s_stop_pending = false;
+            send_json("{\"session_id\":\"%s\",\"type\":\"listen\",\"state\":\"stop\"%s}", NULL);
+            s_listening = false;
+        }
+    }
+}
+
+static int64_t now_ms(void) { return esp_timer_get_time() / 1000; }
+static void auto_listen(void)
+{
+    pkt_t *p;
+    while (xQueueReceive(s_txq, &p, 0) == pdTRUE) free(p);
+    s_stop_pending = false;
+    send_json("{\"session_id\":\"%s\",\"type\":\"listen\",\"state\":\"start\",\"mode\":\"auto\"%s}", NULL);
+    s_listening = true;
+    s_mic_on = true;
+    xTaskNotifyGive(s_mic);
+    s_st = XZ_LISTEN;
+    s_listen_since = now_ms();
+}
+static void auto_pause(void)
+{
+    s_mic_on = false;
+    if (s_listening) s_stop_pending = true;
+    s_st = XZ_READY;
 }
 
 /* The server closes a connection that sits idle, so it is only a convenience to keep one open:
@@ -383,17 +475,28 @@ static void ctl_task(void *arg)
             if (!ok) break;                                   /* fail() already said why */
             s_lost = false;
             s_listening = false;
-            if (s_want_listen) { send_listen_start(); s_st = XZ_LISTEN; }
+            if (s_auto) { if (s_paused) s_st = XZ_READY; else auto_listen(); }
+            else if (s_want_listen) { send_listen_start(); s_st = XZ_LISTEN; }
             else if (!s_mic_on && s_listening == false && uxQueueMessagesWaiting(s_txq)) {
                 /* released before we got connected: send what was said, then stop */
                 send_listen_start();
-                send_json("{\"session_id\":\"%s\",\"type\":\"listen\",\"state\":\"stop\"%s}", NULL);
-                s_listening = false;
+                s_stop_pending = true;                    /* stop after the held audio is out */
                 s_st = XZ_THINK;
             } else s_st = XZ_READY;
             while (s_want) {
-                EventBits_t b = xEventGroupWaitBits(s_ev, EV_CLOSED, pdTRUE, pdFALSE, pdMS_TO_TICKS(500));
+                EventBits_t b = xEventGroupWaitBits(s_ev, EV_CLOSED, pdTRUE, pdFALSE, pdMS_TO_TICKS(100));
                 if (b & EV_CLOSED) break;
+                if (!s_auto) continue;
+                if (s_relisten && !s_paused && !s_play && !s_spk_busy && !uxQueueMessagesWaiting(s_rxq)) {
+                    s_relisten = false;
+                    vTaskDelay(pdMS_TO_TICKS(300));       /* let the speaker's tail die out before the mic opens */
+                    if (!s_paused && s_want) auto_listen();
+                }
+                if (s_st == XZ_LISTEN && !s_paused && now_ms() - s_listen_since > 120000) {
+                    s_paused = true;                      /* 2 minutes of nothing: stop listening to save battery */
+                    auto_pause();
+                }
+                if (s_st == XZ_THINK && !s_play && now_ms() - s_listen_since > 20000) s_relisten = true;   /* no answer came */
             }
             ws_close();
             s_play = false;
@@ -403,8 +506,9 @@ static void ctl_task(void *arg)
             s_lost = true;
             if (s_st != XZ_LISTEN) s_st = XZ_READY;
             ESP_LOGI(TAG, "connection closed; will reconnect on the next press");
-            while (s_want && !s_want_listen) ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(500));
+            while (s_want && !s_want_listen && !(s_auto && !s_paused)) ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(500));
             if (!s_want) break;
+            if (s_auto) vTaskDelay(pdMS_TO_TICKS(300));
             s_st = XZ_LISTEN;                                 /* keep showing "listening" while we reconnect */
         }
         ws_close();
@@ -433,6 +537,7 @@ static void mic_task(void *arg)
         esp_codec_dev_sample_info_t fs = { .sample_rate = 24000, .channel = 4, .bits_per_sample = 16, .channel_mask = 0x0F };
         if (!mic || esp_codec_dev_open(mic, &fs) != ESP_CODEC_DEV_OK) { ESP_LOGW(TAG, "mic open failed"); continue; }
         esp_codec_dev_set_in_gain(mic, 30.0f);
+        s_mic_busy = true;
         int n16 = 0;
         uint32_t phase = 0;                                  /* 24k -> 16k: step 1.5 in 16.16 */
         int16_t prev = 0;
@@ -447,11 +552,14 @@ static void mic_task(void *arg)
                 if (n16 == 960) {
                     int len = opus_encode(enc, pcm16, 960, opus, 600);
                     if (len > 0) {
-                        if (s_listening && s_ws && esp_websocket_client_is_connected(s_ws))
-                        { if (esp_websocket_client_send_bin(s_ws, (const char *)opus, len, pdMS_TO_TICKS(500)) > 0) s_n_tx++; }
-                        else {                               /* still connecting: hold it (up to ~6 s) */
-                            pkt_t *pk = heap_caps_malloc(sizeof(pkt_t) + len, MALLOC_CAP_SPIRAM);
-                            if (pk) { pk->len = len; memcpy(pk->d, opus, len); if (xQueueSend(s_txq, &pk, 0) != pdTRUE) free(pk); }
+                        pkt_t *pk = heap_caps_malloc(sizeof(pkt_t) + len, MALLOC_CAP_SPIRAM);
+                        if (pk) {
+                            pk->len = len; memcpy(pk->d, opus, len);
+                            if (xQueueSend(s_txq, &pk, 0) != pdTRUE) {      /* full (~6 s): drop the oldest */
+                                pkt_t *old;
+                                if (xQueueReceive(s_txq, &old, 0) == pdTRUE) free(old);
+                                if (xQueueSend(s_txq, &pk, 0) != pdTRUE) free(pk);
+                            }
                         }
                     }
                     n16 = 0;
@@ -461,6 +569,7 @@ static void mic_task(void *arg)
             prev = frame[255 * 4];
         }
         esp_codec_dev_close(mic);
+        s_mic_busy = false;
     }
 }
 
@@ -473,7 +582,8 @@ static void spk_task(void *arg)
     int16_t *out = heap_caps_malloc(4320 * 2, MALLOC_CAP_SPIRAM);
     for (;;) {
         pkt_t *p;
-        if (xQueueReceive(s_rxq, &p, portMAX_DELAY) != pdTRUE) continue;
+        if (xQueueReceive(s_rxq, &p, pdMS_TO_TICKS(200)) != pdTRUE) { s_spk_busy = false; continue; }
+        s_spk_busy = true;
         if (!s_play || !pcm || !out) { free(p); continue; }
         if (!dec || dec_rate != s_srv_rate) {
             if (dec) opus_decoder_destroy(dec);
@@ -633,12 +743,11 @@ static const char *MCP_TOOLS =
 
 static void mcp_send(const char *id, const char *body_key, const char *body)
 {
-    if (!s_ws || !esp_websocket_client_is_connected(s_ws)) return;
     size_t n = strlen(body) + strlen(id) + 160;
     char *m = heap_caps_malloc(n, MALLOC_CAP_SPIRAM);
     if (!m) return;
     int len = snprintf(m, n, "{\"session_id\":\"%s\",\"type\":\"mcp\",\"payload\":{\"jsonrpc\":\"2.0\",\"id\":%s,\"%s\":%s}}", s_session, id, body_key, body);
-    esp_websocket_client_send_text(s_ws, m, len, pdMS_TO_TICKS(3000));
+    ws_send(false, m, len, 3000);
     free(m);
 }
 
@@ -694,7 +803,9 @@ static bool xz_tasks(void)
     s_ev = xEventGroupCreate();
     s_rxq = xQueueCreateWithCaps(40, sizeof(pkt_t *), MALLOC_CAP_SPIRAM);
     s_txq = xQueueCreateWithCaps(100, sizeof(pkt_t *), MALLOC_CAP_SPIRAM);
-    if (!s_ev || !s_rxq || !s_txq) return false;
+    s_wsl = xSemaphoreCreateMutex();
+    if (!s_ev || !s_rxq || !s_txq || !s_wsl) return false;
+    if (xTaskCreateWithCaps(tx_task, "xz_tx", 6144, NULL, 5, NULL, MALLOC_CAP_SPIRAM) != pdPASS) return false;
     if (xTaskCreateWithCaps(ctl_task, "xz_ctl", 8192, NULL, 4, &s_ctl, MALLOC_CAP_SPIRAM) != pdPASS) return false;
     if (xTaskCreateWithCaps(mic_task, "xz_mic", 32768, NULL, 5, &s_mic, MALLOC_CAP_SPIRAM) != pdPASS) return false;
     if (xTaskCreateWithCaps(spk_task, "xz_spk", 16384, NULL, 5, &s_spk, MALLOC_CAP_SPIRAM) != pdPASS) return false;
@@ -711,6 +822,9 @@ static void xz_open(int mode)
     if (!xz_tasks()) { fail("内存不足"); return; }
     if (radio_playing()) radio_stop();                     /* one thing on the speaker at a time */
     s_mode = mode;
+    s_auto = mode == 0;
+    s_paused = false;
+    s_relisten = false;
     s_want = true;
     xTaskNotifyGive(s_ctl);
 }
@@ -732,12 +846,35 @@ static void talk_down(void)
         send_json("{\"session_id\":\"%s\",\"type\":\"abort\"%s}", NULL);
     }
     s_want_listen = true;
-    s_n_tx = 0; s_n_rx = 0; s_last[0] = 0;
+    s_n_tx = 0; s_n_rx = 0; s_n_fail = 0; s_last[0] = 0;
+    s_stop_pending = false;
     s_mic_on = true;
     xTaskNotifyGive(s_mic);                                                 /* record right away */
-    if (s_lost || !s_ws) xTaskNotifyGive(s_ctl);                            /* reconnect; audio is held meanwhile */
+    if (s_lost || !ws_up()) xTaskNotifyGive(s_ctl);   /* reconnect; audio is held meanwhile */
     else send_listen_start();
     s_st = XZ_LISTEN;
+    hw_haptic(20);
+}
+
+/* hands-free 小智: one tap = pause / continue, or interrupt while it talks */
+static void auto_tap(void)
+{
+    if (s_st == XZ_ERROR || s_st == XZ_OFF) { xz_open(s_mode); return; }
+    if (s_st < XZ_READY && !s_lost) return;                                 /* still setting up */
+    if (s_st == XZ_SPEAK || s_st == XZ_THINK) {
+        s_play = false;
+        send_json("{\"session_id\":\"%s\",\"type\":\"abort\"%s}", NULL);
+        s_paused = false;
+        s_relisten = true;
+    } else if (s_paused) {
+        s_paused = false;
+        s_relisten = true;
+        s_n_tx = 0; s_n_rx = 0; s_n_fail = 0; s_last[0] = 0;
+        xTaskNotifyGive(s_ctl);                                             /* reconnects if the server had closed */
+    } else {
+        s_paused = true;
+        auto_pause();
+    }
     hw_haptic(20);
 }
 
@@ -747,8 +884,7 @@ static void talk_up(void)
     s_want_listen = false;
     s_mic_on = false;
     if (s_listening) {
-        send_json("{\"session_id\":\"%s\",\"type\":\"listen\",\"state\":\"stop\"%s}", NULL);
-        s_listening = false;
+        s_stop_pending = true;                   /* the sender task sends stop after the last packet */
         s_st = XZ_THINK;
     }
     /* not connected yet: the control task sends the held audio + stop once it is */
@@ -793,7 +929,15 @@ static void ui_paint(lv_timer_t *t)
     char line[120];
     if (s_st == XZ_ACTIVATE) snprintf(line, sizeof(line), "激活码 %s\n扫码打开 xiaozhi.me → 添加设备 → 输入激活码", s_code);
     else if (s_st == XZ_ERROR) snprintf(line, sizeof(line), "%s\n（点按钮重试）", s_err);
+    else if (s_auto && s_st == XZ_LISTEN) snprintf(line, sizeof(line), "在听…直接说话就好");
+    else if (s_auto && s_st == XZ_READY) snprintf(line, sizeof(line), "%s", s_paused ? "已暂停（点一下继续听）" : "准备听…");
+    else if (s_auto && s_st == XZ_SPEAK) snprintf(line, sizeof(line), "小智在说话（点一下打断）");
     else snprintf(line, sizeof(line), "%s", ST[s_st]);
+    if (s_auto) {
+        const char *bt = s_st == XZ_LISTEN ? "点一下暂停" : s_st == XZ_SPEAK || s_st == XZ_THINK ? "点一下打断"
+                       : s_paused ? "点一下继续听" : s_st == XZ_ERROR ? "点一下重试" : "小智";
+        lv_label_set_text(lv_obj_get_child(s_ui_btn, 0), bt);
+    }
     lv_label_set_text(s_ui_st, line);
     char u[240], b[480];
     taskENTER_CRITICAL(&s_txt_mux);
@@ -809,8 +953,10 @@ static void ui_paint(lv_timer_t *t)
     lv_label_set_text(s_ui_user, u[0] ? u : "");
     lv_label_set_text(s_ui_bot, b);
     if (s_ui_dbg) {
-        char d[80];
-        if (s_n_tx || s_n_rx || s_last[0]) snprintf(d, sizeof(d), "送出 %d · 收到 %d · %s", s_n_tx, s_n_rx, s_last);
+        char d[140];
+        if (s_n_tx || s_n_rx || s_last[0] || s_close_why[0])
+            snprintf(d, sizeof(d), "送出 %d%s · 收到 %d · %s%s%s", s_n_tx, s_n_fail ? "（有失败）" : "", s_n_rx, s_last,
+                     s_close_why[0] ? " · " : "", s_close_why);
         else d[0] = 0;
         lv_label_set_text(s_ui_dbg, d);
     }
@@ -821,6 +967,7 @@ static void ui_paint(lv_timer_t *t)
 static void btn_cb(lv_event_t *e)
 {
     lv_event_code_t c = lv_event_get_code(e);
+    if (s_auto) { if (c == LV_EVENT_CLICKED) auto_tap(); ui_paint(NULL); return; }
     if (c == LV_EVENT_PRESSED) talk_down();
     else if (c == LV_EVENT_RELEASED || c == LV_EVENT_PRESS_LOST) talk_up();
     ui_paint(NULL);
@@ -869,6 +1016,7 @@ static void build(lv_obj_t *root, const char *title, int mode, uint32_t tint, co
     lv_obj_add_event_cb(s_ui_btn, btn_cb, LV_EVENT_PRESSED, NULL);
     lv_obj_add_event_cb(s_ui_btn, btn_cb, LV_EVENT_RELEASED, NULL);
     lv_obj_add_event_cb(s_ui_btn, btn_cb, LV_EVENT_PRESS_LOST, NULL);
+    lv_obj_add_event_cb(s_ui_btn, btn_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t *l = ui_label(s_ui_btn, &font_cn20, 0x0B1F1C, "按住说话");
     lv_obj_center(l);
     s_ui_qr = lv_qrcode_create(root);
