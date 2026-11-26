@@ -134,7 +134,8 @@ static void nets_save(void)
 
 /* Where we last got online: joining that AP directly (known channel + BSSID) skips the
  * ~2 s all-channel scan. Kept in NVS so the first join after a reboot is fast too. */
-typedef struct { char ssid[33]; uint8_t bssid[6]; uint8_t ch; } last_ap_t;
+typedef struct { char ssid[33]; uint8_t bssid[6]; uint8_t ch; int8_t rssi; } last_ap_t;
+static bool s_fast_ok;                    /* the fast (pinned-AP) join is tried once per WiFi start */
 static last_ap_t s_last;
 
 static void last_save(void)
@@ -156,11 +157,13 @@ static void last_record(void)
 {
     wifi_ap_record_t ap;
     if (esp_wifi_sta_get_ap_info(&ap) != ESP_OK) return;
-    if (!strcmp(s_last.ssid, g_set.ssid) && !memcmp(s_last.bssid, ap.bssid, 6) && s_last.ch == ap.primary) return;
+    if (!strcmp(s_last.ssid, g_set.ssid) && !memcmp(s_last.bssid, ap.bssid, 6) && s_last.ch == ap.primary
+        && abs(s_last.rssi - ap.rssi) < 8) return;
     memset(&s_last, 0, sizeof(s_last));
     strncpy(s_last.ssid, g_set.ssid, 32);
     memcpy(s_last.bssid, ap.bssid, 6);
     s_last.ch = ap.primary;
+    s_last.rssi = ap.rssi;
     last_save();
 }
 
@@ -266,10 +269,17 @@ static bool join_hint(int k, int rssi, int timeout_ms, const last_ap_t *hint)
     strncpy((char *)wc.sta.ssid, s_nets[k].ssid, sizeof(wc.sta.ssid));
     strncpy((char *)wc.sta.password, s_nets[k].pass, sizeof(wc.sta.password));
     wc.sta.threshold.authmode = s_nets[k].pass[0] ? WIFI_AUTH_WPA_PSK : WIFI_AUTH_OPEN;
+    wc.sta.sae_pwe_h2e = WPA3_SAE_PWE_BOTH;         /* WPA2 and WPA3 networks */
+    wc.sta.pmf_cfg.capable = true;
+    wc.sta.rm_enabled = 1;                          /* 802.11k/v: campus networks steer us to a better AP */
+    wc.sta.btm_enabled = 1;
     if (hint) {                                     /* straight to the AP we used last time */
         wc.sta.channel = hint->ch;
         wc.sta.bssid_set = true;
         memcpy(wc.sta.bssid, hint->bssid, 6);
+    } else {                                        /* several APs with this name: take the strongest */
+        wc.sta.scan_method = WIFI_ALL_CHANNEL_SCAN;
+        wc.sta.sort_method = WIFI_CONNECT_AP_BY_SIGNAL;
     }
     esp_wifi_set_config(WIFI_IF_STA, &wc);
     memset(g_set.ssid, 0, sizeof(g_set.ssid));
@@ -293,7 +303,11 @@ static bool join(int k, int rssi, int timeout_ms) { return join_hint(k, rssi, ti
 static bool try_join(void)
 {
     if (!s_nnets) return false;
-    if (s_last.ssid[0]) {
+    /* fast join: only the first try after WiFi starts, and only if that AP was strong last time;
+     * otherwise (e.g. it just failed, or we moved) scan and take the strongest AP */
+    bool fast = s_fast_ok && s_last.ssid[0] && s_last.rssi >= -70 && s_last.rssi < 0;
+    s_fast_ok = false;
+    if (fast) {
         for (int k = 0; k < s_nnets; k++)
             if (!strcmp(s_nets[k].ssid, s_last.ssid)) {
                 ESP_LOGI(TAG, "fast join %s on ch %d", s_last.ssid, s_last.ch);
@@ -353,7 +367,7 @@ static void radio_up(void)
 {
     if (!s_wifi_enabled || !s_wifi_started) return;
     radio_lock();
-    if (!s_radio_on) { s_radio_on = true; esp_wifi_start(); ESP_LOGI(TAG, "wifi on"); }
+    if (!s_radio_on) { s_radio_on = true; s_fast_ok = true; esp_wifi_start(); ESP_LOGI(TAG, "wifi on"); }
     radio_unlock();
     net_wifi_reconnect();
 }
