@@ -49,6 +49,8 @@ static char s_code[16];                       /* activation code while not yet b
 static char s_user[240], s_bot[480];          /* last thing said by the user / by 小智 */
 static portMUX_TYPE s_txt_mux = portMUX_INITIALIZER_UNLOCKED;
 static volatile bool s_want;                  /* an app wants the session */
+static volatile int s_n_tx, s_n_rx;          /* voice frames sent / reply frames received (shown small) */
+static char s_last[40];                       /* last message type from the server */
 static volatile int s_mode;                   /* 0 chat, 1 translate */
 static volatile bool s_need_save;
 static volatile bool s_mic_on, s_play;
@@ -213,6 +215,10 @@ static void on_json(const char *data, size_t len)
     if (!j) return;
     const char *type = cJSON_GetStringValue(cJSON_GetObjectItem(j, "type"));
     if (!type) { cJSON_Delete(j); return; }
+    {
+        const char *stt = cJSON_GetStringValue(cJSON_GetObjectItem(j, "state"));
+        snprintf(s_last, sizeof(s_last), "%.16s%s%.16s", type, stt ? " " : "", stt ? stt : "");
+    }
     if (!strcmp(type, "hello")) {
         const char *sid = cJSON_GetStringValue(cJSON_GetObjectItem(j, "session_id"));
         if (sid) snprintf(s_session, sizeof(s_session), "%s", sid);
@@ -265,6 +271,7 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t id, void *data)
             if (s_txt && s_txt_len + d->data_len < 8192) { memcpy(s_txt + s_txt_len, d->data_ptr, d->data_len); s_txt_len += d->data_len; }
             if (s_txt && d->payload_offset + d->data_len >= d->payload_len) { on_json(s_txt, s_txt_len); s_txt_len = 0; }
         } else if (d->op_code == 0x2 && d->payload_offset == 0 && d->data_len == d->payload_len && d->data_len > 0) {
+            s_n_rx++;
             if (!s_play || s_mode == 1) break;                                   /* aborted / translator: drop */
             pkt_t *p = heap_caps_malloc(sizeof(pkt_t) + d->data_len, MALLOC_CAP_SPIRAM);
             if (!p) break;
@@ -341,7 +348,7 @@ static void send_listen_start(void)
     pkt_t *p;
     for (int pass = 0; pass < 2; pass++) {             /* again after the flag: the mic may queue one meanwhile */
         while (xQueueReceive(s_txq, &p, 0) == pdTRUE) {
-            if (s_ws) esp_websocket_client_send_bin(s_ws, (const char *)p->d, p->len, pdMS_TO_TICKS(500));
+            if (s_ws && esp_websocket_client_send_bin(s_ws, (const char *)p->d, p->len, pdMS_TO_TICKS(500)) > 0) s_n_tx++;
             free(p);
         }
         s_listening = true;
@@ -441,7 +448,7 @@ static void mic_task(void *arg)
                     int len = opus_encode(enc, pcm16, 960, opus, 600);
                     if (len > 0) {
                         if (s_listening && s_ws && esp_websocket_client_is_connected(s_ws))
-                            esp_websocket_client_send_bin(s_ws, (const char *)opus, len, pdMS_TO_TICKS(500));
+                        { if (esp_websocket_client_send_bin(s_ws, (const char *)opus, len, pdMS_TO_TICKS(500)) > 0) s_n_tx++; }
                         else {                               /* still connecting: hold it (up to ~6 s) */
                             pkt_t *pk = heap_caps_malloc(sizeof(pkt_t) + len, MALLOC_CAP_SPIRAM);
                             if (pk) { pk->len = len; memcpy(pk->d, opus, len); if (xQueueSend(s_txq, &pk, 0) != pdTRUE) free(pk); }
@@ -725,6 +732,7 @@ static void talk_down(void)
         send_json("{\"session_id\":\"%s\",\"type\":\"abort\"%s}", NULL);
     }
     s_want_listen = true;
+    s_n_tx = 0; s_n_rx = 0; s_last[0] = 0;
     s_mic_on = true;
     xTaskNotifyGive(s_mic);                                                 /* record right away */
     if (s_lost || !s_ws) xTaskNotifyGive(s_ctl);                            /* reconnect; audio is held meanwhile */
@@ -773,7 +781,7 @@ static void font_clean(char *s, const lv_font_t *f)
         else break;
     }
 }
-static lv_obj_t *s_ui_st, *s_ui_user, *s_ui_bot, *s_ui_btn, *s_ui_qr;
+static lv_obj_t *s_ui_st, *s_ui_user, *s_ui_bot, *s_ui_btn, *s_ui_qr, *s_ui_dbg;
 static bool s_qr_forced;                     /* the user tapped the link: show the QR until tapped again */
 static lv_timer_t *s_ui_tm;
 
@@ -800,6 +808,12 @@ static void ui_paint(lv_timer_t *t)
     font_clean(b, &font_cn20);
     lv_label_set_text(s_ui_user, u[0] ? u : "");
     lv_label_set_text(s_ui_bot, b);
+    if (s_ui_dbg) {
+        char d[80];
+        if (s_n_tx || s_n_rx || s_last[0]) snprintf(d, sizeof(d), "送出 %d · 收到 %d · %s", s_n_tx, s_n_rx, s_last);
+        else d[0] = 0;
+        lv_label_set_text(s_ui_dbg, d);
+    }
     bool live = s_st == XZ_LISTEN;
     lv_obj_set_style_bg_color(s_ui_btn, lv_color_hex(live ? 0xF43F5E : s_st >= XZ_READY && s_st <= XZ_SPEAK ? 0x14B8A6 : 0x3A3A3C), 0);
 }
@@ -819,6 +833,7 @@ static void ui_close(void)
     s_qr_forced = false;
     if (s_ui_tm) { lv_timer_delete(s_ui_tm); s_ui_tm = NULL; }
     s_ui_st = NULL;
+    s_ui_dbg = NULL;
     xz_shut();
     xz_save_if_needed();
     power_keep_awake(false);
@@ -842,6 +857,10 @@ static void build(lv_obj_t *root, const char *title, int mode, uint32_t tint, co
     lv_label_set_long_mode(s_ui_bot, LV_LABEL_LONG_DOT);
     lv_obj_set_height(s_ui_bot, 150);
     lv_obj_set_pos(s_ui_bot, 22, 164);
+    s_ui_dbg = ui_label(root, &font_cn16, 0x636366, "");
+    lv_obj_set_width(s_ui_dbg, 366);
+    lv_obj_set_style_text_align(s_ui_dbg, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_pos(s_ui_dbg, 22, 306);
     s_ui_btn = lv_button_create(root);
     lv_obj_set_size(s_ui_btn, 366, 92);
     lv_obj_set_pos(s_ui_btn, 22, 330);

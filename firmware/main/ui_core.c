@@ -254,6 +254,40 @@ void ui_status_changed(void)
     if (g_app_refresh) g_app_refresh();
 }
 
+
+/* Small pill at the top of every app screen: WiFi in use / radio playing. (The watch face shows
+ * the same two icons next to Bluetooth and the battery.) */
+static lv_obj_t *s_act, *s_act_wifi, *s_act_music;
+static void activity_tick(lv_timer_t *t)
+{
+    bool w = net_wifi_busy(), m = radio_playing();
+    bool show = (w || m) && lv_screen_active() != s_tank;
+    if (!show) { lv_obj_add_flag(s_act, LV_OBJ_FLAG_HIDDEN); return; }
+    if (w) lv_obj_remove_flag(s_act_wifi, LV_OBJ_FLAG_HIDDEN); else lv_obj_add_flag(s_act_wifi, LV_OBJ_FLAG_HIDDEN);
+    if (m) lv_obj_remove_flag(s_act_music, LV_OBJ_FLAG_HIDDEN); else lv_obj_add_flag(s_act_music, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_remove_flag(s_act, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(s_act);
+}
+static void activity_create(void)
+{
+    s_act = lv_obj_create(lv_layer_top());
+    lv_obj_set_size(s_act, LV_SIZE_CONTENT, 22);
+    lv_obj_align(s_act, LV_ALIGN_TOP_MID, 0, 3);
+    lv_obj_set_style_bg_color(s_act, lv_color_hex(0x1C1C1E), 0);
+    lv_obj_set_style_radius(s_act, 11, 0);
+    lv_obj_set_style_border_width(s_act, 0, 0);
+    lv_obj_set_style_pad_hor(s_act, 10, 0);
+    lv_obj_set_style_pad_ver(s_act, 0, 0);
+    lv_obj_set_flex_flow(s_act, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(s_act, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(s_act, 8, 0);
+    lv_obj_remove_flag(s_act, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+    s_act_wifi = ui_label(s_act, &lv_font_montserrat_14, 0x5EEAD4, LV_SYMBOL_WIFI);
+    s_act_music = ui_label(s_act, &lv_font_montserrat_14, 0xF472B6, LV_SYMBOL_AUDIO);
+    lv_obj_add_flag(s_act, LV_OBJ_FLAG_HIDDEN);
+    lv_timer_create(activity_tick, 1000, NULL);
+}
+
 void ui_init(void)
 {
     lv_display_t *d = lv_display_get_default();
@@ -264,6 +298,7 @@ void ui_init(void)
     s_apps = apps_create();
     lv_screen_load(s_tank);
     tank_on_show();
+    activity_create();
 }
 
 /* An app couldn't get its memory: say so in the middle of the screen, with what is left. */

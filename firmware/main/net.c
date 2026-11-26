@@ -35,6 +35,8 @@ void net_apply_tz(void)
 
 bool net_time_valid(void) { return s_time_valid; }
 bool net_wifi_connected(void) { return s_wifi_up; }
+static volatile int s_users;
+bool net_wifi_busy(void) { return s_wifi_up && s_users > 0; }   /* something is using the network now */
 const char *net_wifi_ssid(void) { return g_set.ssid; }
 
 static void status_async(void *arg) { ui_status_changed(); }
@@ -73,7 +75,7 @@ static net_t s_nets[MAX_NETS];
 static int s_nnets;
 static EventGroupHandle_t s_ev;
 static TaskHandle_t s_mgr;
-static volatile int s_users;            /* jobs that need WiFi right now */
+/* s_users (declared above): jobs that need WiFi right now */
 static esp_timer_handle_t s_off_timer;
 static volatile bool s_radio_on;
 /* s_users is changed from many tasks (ntp, weather, light, BLE host): keep it atomic.

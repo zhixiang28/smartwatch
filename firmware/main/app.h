@@ -235,6 +235,7 @@ int xz_state(void);                /* see xiaozhi.c, for the phone page */
 const char *xz_code(void);         /* pending activation code, "" if none */
 void xz_save_if_needed(void);      /* NVS writes deferred from PSRAM-stack tasks */
 bool radio_playing(void);
+bool net_wifi_busy(void);
 void radio_stop(void);
 void reminders_check(void);
 void tank_attention(const char *msg);

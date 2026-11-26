@@ -27,7 +27,7 @@ typedef struct {
 
 typedef struct { lv_obj_t *obj; float x, y, floor; bool on; } pel_t;
 
-static lv_obj_t *s_scr, *s_time, *s_date, *s_hint, *s_batt, *s_bt, *s_murk, *s_algae[2], *s_night, *s_handle;
+static lv_obj_t *s_scr, *s_time, *s_date, *s_hint, *s_batt, *s_bt, *s_wifi, *s_music, *s_murk, *s_algae[2], *s_night, *s_handle;
 static fish_t s_fish[NFISH];
 static pel_t s_pel[NPEL];
 static lv_timer_t *s_timer;
@@ -100,6 +100,8 @@ static void update_clock(void)
     else lv_label_set_text(s_batt, "");
     lv_obj_set_style_image_recolor(s_bt, lv_color_hex(ble_connected() ? C_BLUE : 0x5A6B68), 0);
     if (ble_is_on()) lv_obj_remove_flag(s_bt, LV_OBJ_FLAG_HIDDEN); else lv_obj_add_flag(s_bt, LV_OBJ_FLAG_HIDDEN);
+    if (net_wifi_busy()) lv_obj_remove_flag(s_wifi, LV_OBJ_FLAG_HIDDEN); else lv_obj_add_flag(s_wifi, LV_OBJ_FLAG_HIDDEN);
+    if (radio_playing()) lv_obj_remove_flag(s_music, LV_OBJ_FLAG_HIDDEN); else lv_obj_add_flag(s_music, LV_OBJ_FLAG_HIDDEN);
 }
 
 static void drop_food(int cx)
@@ -372,7 +374,7 @@ lv_obj_t *tank_create(void)
     lv_obj_align(s_date, LV_ALIGN_TOP_MID, 0, 202);
 
     lv_obj_t *st = lv_obj_create(s_scr);
-    lv_obj_set_size(st, 140, 40);
+    lv_obj_set_size(st, 220, 40);
     lv_obj_align(st, LV_ALIGN_TOP_MID, 0, 22);
     lv_obj_set_style_bg_opa(st, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(st, 0, 0);
@@ -381,6 +383,10 @@ lv_obj_t *tank_create(void)
     lv_obj_set_style_pad_column(st, 8, 0);
     lv_obj_remove_flag(st, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(st, status_clicked, LV_EVENT_CLICKED, NULL);
+    s_music = ui_label(st, &lv_font_montserrat_14, 0xF472B6, LV_SYMBOL_AUDIO);   /* radio playing */
+    s_wifi = ui_label(st, &lv_font_montserrat_14, 0x5EEAD4, LV_SYMBOL_WIFI);     /* network in use */
+    lv_obj_add_flag(s_music, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_wifi, LV_OBJ_FLAG_HIDDEN);
     s_bt = ui_icon(st, &img_icon_bt, 0x5A6B68);
     lv_image_set_scale(s_bt, 110);
     s_batt = ui_label(st, &font_cn16, 0xA8E8DD, "");
