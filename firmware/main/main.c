@@ -24,6 +24,32 @@ static void stable_task(void *arg)
     vTaskDelete(NULL);
 }
 
+
+/* After a crash: show where it happened, so a photo of the watch is enough to find the bug. */
+static lv_obj_t *s_crash;
+static void crash_close(lv_event_t *e) { if (lv_event_get_user_data(e)) diag_clear(); lv_obj_delete(s_crash); s_crash = NULL; }
+static void crash_screen(void)
+{
+    s_crash = lv_obj_create(lv_layer_top());
+    lv_obj_set_size(s_crash, SCR_W, SCR_H);
+    lv_obj_set_style_bg_color(s_crash, lv_color_black(), 0);
+    lv_obj_set_style_border_width(s_crash, 0, 0);
+    lv_obj_set_style_radius(s_crash, 0, 0);
+    lv_obj_remove_flag(s_crash, LV_OBJ_FLAG_SCROLLABLE);
+    char t[400];
+    snprintf(t, sizeof(t), "手表上次当机了（%s）\n拍照传给我就能找到原因：\n\n%s", diag_reset_reason(), diag_summary());
+    lv_obj_t *l = ui_label(s_crash, &font_cn16, 0xFCD34D, t);
+    lv_obj_set_width(l, 360);
+    lv_label_set_long_mode(l, LV_LABEL_LONG_WRAP);
+    lv_obj_align(l, LV_ALIGN_TOP_MID, 0, 40);
+    lv_obj_t *a = ui_pill_btn(s_crash, "关闭", C_CARD, C_TEXT, 170, 56);
+    lv_obj_set_pos(a, 28, 410);
+    lv_obj_add_event_cb(a, crash_close, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *b = ui_pill_btn(s_crash, "清除记录", C_CARD, 0xF87171, 170, 56);
+    lv_obj_set_pos(b, 212, 410);
+    lv_obj_add_event_cb(b, crash_close, LV_EVENT_CLICKED, (void *)1);
+}
+
 void app_main(void)
 {
     ESP_LOGI(TAG, "FishWatch v%s starting", esp_app_get_description()->version);
@@ -65,6 +91,7 @@ void app_main(void)
         snprintf(t, sizeof(t), "上次重启不正常（%s）%s", diag_reset_reason(), diag_has_dump() ? "，连手机看原因" : "");
         if (ui_lock(1000)) { ui_toast(t); ui_unlock(); }
     }
+    if (!g_safe_mode && diag_has_dump() && diag_summary()[0] && ui_lock(1000)) { crash_screen(); ui_unlock(); }
     if (g_set.notif_on) ble_start();     /* the notification app reconnects by itself */
     hw_haptic(40);
     xTaskCreate(stable_task, "stable", 4096, NULL, 2, NULL);

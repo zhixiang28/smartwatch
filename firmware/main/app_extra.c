@@ -28,7 +28,7 @@ static char s_l_state[2][4];               /* what the light really is: "ON" / "
 static bool s_l_inv[2];
 static volatile bool s_l_busy;
 static volatile int s_l_err;               /* 0 ok, 1 network, 2 key */
-static char s_l_detail[96];
+static char s_l_detail[160];
 static lv_obj_t *s_l_btn[2], *s_l_info;
 
 static int http_call(const char *path, const char *body, char *out, int outlen)
@@ -50,8 +50,16 @@ static int http_call(const char *path, const char *body, char *out, int outlen)
     esp_http_client_set_header(c, "apikey", SB_KEY);
     if (body) esp_http_client_set_header(c, "Content-Type", "application/json");
     int len = 0, status = -1;
-    esp_err_t oe = esp_http_client_open(c, body ? strlen(body) : 0);
-    if (oe != ESP_OK) { snprintf(s_l_detail, sizeof(s_l_detail), "连不上服务器：%s", esp_err_to_name(oe)); ESP_LOGW(TAG, "http open: %s", esp_err_to_name(oe)); }
+    esp_err_t oe = ESP_FAIL;
+    char why[96] = "";
+    for (int t = 0; t < 3; t++) {                       /* a failed connect is often just a hiccup: try again */
+        if ((oe = esp_http_client_open(c, body ? strlen(body) : 0)) == ESP_OK) break;
+        net_err_text(c, oe, why, sizeof(why));
+        ESP_LOGW(TAG, "http open (%d): %s", t, why);
+        esp_http_client_close(c);
+        vTaskDelay(pdMS_TO_TICKS(700 * (t + 1)));
+    }
+    if (oe != ESP_OK) snprintf(s_l_detail, sizeof(s_l_detail), "连不上服务器：%s", why);
     if (oe == ESP_OK) {
         int w = body ? esp_http_client_write(c, body, strlen(body)) : 0;
         int64_t cl = w < 0 ? ESP_FAIL : esp_http_client_fetch_headers(c);

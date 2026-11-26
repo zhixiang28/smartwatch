@@ -360,8 +360,9 @@ static esp_pm_lock_handle_t s_pm_net;
 static void perf(bool on)
 {
     if (!s_pm_net) esp_pm_lock_create(ESP_PM_CPU_FREQ_MAX, 0, "net", &s_pm_net);
-    if (on) { if (s_pm_net) esp_pm_lock_acquire(s_pm_net); esp_wifi_set_ps(WIFI_PS_NONE); }
-    else { esp_wifi_set_ps(WIFI_PS_MIN_MODEM); if (s_pm_net) esp_pm_lock_release(s_pm_net); }
+    /* WiFi keeps modem sleep (needed when Bluetooth is on too); only the CPU stays at full speed */
+    if (on) { if (s_pm_net) esp_pm_lock_acquire(s_pm_net); }
+    else if (s_pm_net) esp_pm_lock_release(s_pm_net);
 }
 
 void net_wifi_use(bool on)

@@ -53,8 +53,8 @@ void diag_init(void)
     if (s_dump) {
         esp_core_dump_summary_t *sm = calloc(1, sizeof(*sm));
         if (sm && esp_core_dump_get_summary(sm) == ESP_OK) {
-            int n = snprintf(s_summary, sizeof(s_summary), "task %.15s pc 0x%08lx cause %lu vaddr 0x%08lx bt",
-                             sm->exc_task, (unsigned long)sm->exc_pc, (unsigned long)sm->ex_info.exc_cause,
+            int n = snprintf(s_summary, sizeof(s_summary), "elf %.8s task %.15s pc 0x%08lx cause %lu vaddr 0x%08lx bt",
+                             (const char *)sm->app_elf_sha256, sm->exc_task, (unsigned long)sm->exc_pc, (unsigned long)sm->ex_info.exc_cause,
                              (unsigned long)sm->ex_info.exc_vaddr);
             for (uint32_t i = 0; i < sm->exc_bt_info.depth && i < 16 && n < (int)sizeof(s_summary) - 12; i++)
                 n += snprintf(s_summary + n, sizeof(s_summary) - n, " 0x%08lx", (unsigned long)sm->exc_bt_info.bt[i]);
