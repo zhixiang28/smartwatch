@@ -120,7 +120,7 @@ static lv_timer_t *s_rd_tm;
 
 static int rd_count(void) { return N_BUILTIN + (g_set.radio_url[0] ? 1 : 0); }
 static const char *rd_url(int i) { return i < N_BUILTIN ? STATIONS[i].url : g_set.radio_url; }
-static const char *rd_name(int i) { return i < N_BUILTIN ? STATIONS[i].name : "自订电台"; }
+static const char *rd_name(int i) { return i < N_BUILTIN ? STATIONS[i].name : g_set.radio_name[0] ? g_set.radio_name : "自订电台"; }
 bool radio_playing(void) { return s_rd_play; }
 
 static void rd_fail(const char *m) { snprintf(s_rd_err, sizeof(s_rd_err), "%s", m); s_rd_state = 5; ESP_LOGW(RTAG, "%s", m); }
@@ -310,11 +310,169 @@ static void rd_vol(lv_event_t *e)
     sound_set_volume(g_set.volume);
     rd_paint(NULL);
 }
+static void find_close(lv_event_t *e);
 static void rd_close(void)
 {
+    find_close(NULL);
     if (s_rd_tm) { lv_timer_delete(s_rd_tm); s_rd_tm = NULL; }
     s_rd_st = NULL;
     store_save();                       /* station + volume */
+}
+
+/* ---------------- 找电台: Radio Browser directory (free, no key), MP3 stations only ----------------
+ * The watch can only decode MP3, so the search asks for codec=MP3. A station picked here becomes
+ * the custom station (same slot the phone page fills) and starts playing. */
+#include "cJSON.h"
+#define FIND_MAX 20
+typedef struct { char name[48]; char url[128]; int kbps; } found_t;
+static found_t *s_found;
+static int s_nfound;
+static volatile int s_find_state;       /* 0 idle 1 searching 2 done 3 failed */
+static char s_find_cc[3] = "SG";
+static lv_obj_t *s_find, *s_find_list, *s_find_st, *s_find_tab[2];
+static lv_timer_t *s_find_tm;
+
+static void find_task(void *arg)
+{
+    static const char *HOSTS[] = {"de1.api.radio-browser.info", "fi1.api.radio-browser.info", "nl1.api.radio-browser.info"};
+    char url[220];
+    char *buf = heap_caps_malloc(64 * 1024, MALLOC_CAP_SPIRAM);
+    int len = -1;
+    net_wifi_use(true);
+    if (buf && net_wait_connected(30000)) {
+        for (int h = 0; h < 3 && len <= 0; h++) {
+            snprintf(url, sizeof(url), "https://%s/json/stations/search?countrycode=%s&codec=MP3&hidebroken=true"
+                     "&order=clickcount&reverse=true&limit=40", HOSTS[h], s_find_cc);
+            esp_http_client_config_t cfg = { .url = url, .timeout_ms = 10000, .crt_bundle_attach = esp_crt_bundle_attach,
+                                             .buffer_size = 4096, .buffer_size_tx = 1024 };
+            esp_http_client_handle_t c = esp_http_client_init(&cfg);
+            if (!c) continue;
+            esp_http_client_set_header(c, "User-Agent", "FishWatch/1.0");
+            if (esp_http_client_open(c, 0) == ESP_OK) {
+                esp_http_client_fetch_headers(c);
+                if (esp_http_client_get_status_code(c) == 200) {
+                    len = 0;
+                    int r;
+                    while (len < 64 * 1024 - 1 && (r = esp_http_client_read(c, buf + len, 64 * 1024 - 1 - len)) > 0) len += r;
+                    buf[len] = 0;
+                }
+            }
+            esp_http_client_close(c);
+            esp_http_client_cleanup(c);
+        }
+    }
+    net_wifi_use(false);
+    int n = 0;
+    cJSON *j = len > 0 ? cJSON_Parse(buf) : NULL;
+    cJSON *it;
+    cJSON_ArrayForEach(it, j) {
+        if (n >= FIND_MAX) break;
+        const char *nm = cJSON_GetStringValue(cJSON_GetObjectItem(it, "name"));
+        const char *u = cJSON_GetStringValue(cJSON_GetObjectItem(it, "url_resolved"));
+        if (!nm || !u || !u[0] || strlen(u) >= sizeof(s_found[0].url) || strstr(u, ".m3u8") || strstr(u, ".pls")) continue;
+        while (*nm == ' ' || *nm == '\t') nm++;
+        snprintf(s_found[n].name, sizeof(s_found[n].name), "%s", nm);
+        snprintf(s_found[n].url, sizeof(s_found[n].url), "%s", u);
+        cJSON *br = cJSON_GetObjectItem(it, "bitrate");
+        s_found[n].kbps = cJSON_IsNumber(br) ? br->valueint : 0;
+        n++;
+    }
+    cJSON_Delete(j);
+    free(buf);
+    s_nfound = n;
+    s_find_state = len > 0 ? 2 : 3;
+    vTaskDelete(NULL);
+}
+
+static void find_pick(lv_event_t *e)
+{
+    int i = (int)(intptr_t)lv_event_get_user_data(e);
+    if (i < 0 || i >= s_nfound) return;
+    snprintf(g_set.radio_url, sizeof(g_set.radio_url), "%s", s_found[i].url);
+    snprintf(g_set.radio_name, sizeof(g_set.radio_name), "%s", s_found[i].name);
+    g_set.radio_station = N_BUILTIN;                    /* the custom slot */
+    store_save();
+    radio_stop();
+    radio_start();
+    if (s_find_tm) { lv_timer_delete(s_find_tm); s_find_tm = NULL; }
+    lv_obj_delete(s_find); s_find = NULL;
+    rd_paint(NULL);
+}
+
+static void find_paint(lv_timer_t *t)
+{
+    if (!s_find) return;
+    for (int k = 0; k < 2; k++)
+        lv_obj_set_style_bg_color(s_find_tab[k], lv_color_hex(!strcmp(s_find_cc, k ? "MY" : "SG") ? 0xEC4899 : C_CARD), 0);
+    if (s_find_state == 1) { lv_label_set_text(s_find_st, "搜索中…"); return; }
+    if (s_find_state == 3) { lv_label_set_text(s_find_st, "搜不到（WiFi 或电台目录连不上）"); s_find_state = 0; return; }
+    if (s_find_state != 2) return;
+    s_find_state = 0;
+    lv_obj_clean(s_find_list);
+    lv_label_set_text_fmt(s_find_st, s_nfound ? "找到 %d 台，点一下播放（会存成自订电台）" : "这个地区没有手表能播的 MP3 电台", s_nfound);
+    for (int i = 0; i < s_nfound; i++) {
+        char t[80];
+        snprintf(t, sizeof(t), s_found[i].kbps ? "%s · %dk" : "%s", s_found[i].name, s_found[i].kbps);
+        lv_obj_t *b = ui_pill_btn(s_find_list, t, C_CARD, C_TEXT, 350, 50);
+        lv_obj_t *l = lv_obj_get_child(b, 0);
+        lv_obj_set_width(l, 320);
+        lv_label_set_long_mode(l, LV_LABEL_LONG_DOT);
+        lv_obj_add_event_cb(b, find_pick, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+    }
+}
+
+static void find_start(void)
+{
+    if (s_find_state == 1) return;
+    if (!s_found && !(s_found = heap_caps_calloc(FIND_MAX, sizeof(found_t), MALLOC_CAP_SPIRAM))) return;
+    s_find_state = 1;
+    if (s_find_list) lv_obj_clean(s_find_list);
+    if (xTaskCreateWithCaps(find_task, "rd_find", 8192, NULL, 4, NULL, MALLOC_CAP_SPIRAM) != pdPASS) s_find_state = 3;
+    find_paint(NULL);
+}
+static void find_tab(lv_event_t *e) { snprintf(s_find_cc, sizeof(s_find_cc), "%s", (intptr_t)lv_event_get_user_data(e) ? "MY" : "SG"); find_start(); }
+static void find_close(lv_event_t *e)
+{
+    if (s_find_tm) { lv_timer_delete(s_find_tm); s_find_tm = NULL; }
+    if (s_find) { lv_obj_delete(s_find); s_find = NULL; }
+    s_find_list = NULL;
+}
+
+static void find_open(lv_event_t *e)
+{
+    if (s_find) return;
+    s_find = lv_obj_create(lv_screen_active());
+    lv_obj_set_size(s_find, SCR_W, SCR_H);
+    lv_obj_set_pos(s_find, 0, 0);
+    lv_obj_set_style_bg_color(s_find, lv_color_black(), 0);
+    lv_obj_set_style_border_width(s_find, 0, 0);
+    lv_obj_set_style_radius(s_find, 0, 0);
+    lv_obj_set_style_pad_all(s_find, 0, 0);
+    lv_obj_remove_flag(s_find, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_t *x = ui_pill_btn(s_find, "关闭", C_CARD, C_TEXT, 100, 50);
+    lv_obj_set_pos(x, 22, 20);
+    lv_obj_add_event_cb(x, find_close, LV_EVENT_CLICKED, NULL);
+    for (int k = 0; k < 2; k++) {
+        s_find_tab[k] = ui_pill_btn(s_find, k ? "马来西亚" : "新加坡", C_CARD, C_TEXT, 126, 50);
+        lv_obj_set_pos(s_find_tab[k], 130 + k * 134, 20);
+        lv_obj_add_event_cb(s_find_tab[k], find_tab, LV_EVENT_CLICKED, (void *)(intptr_t)k);
+    }
+    s_find_st = ui_label(s_find, &font_cn16, 0xA1A1AA, "");
+    lv_obj_set_width(s_find_st, 366);
+    lv_obj_set_style_text_align(s_find_st, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(s_find_st, LV_ALIGN_TOP_MID, 0, 80);
+    s_find_list = lv_obj_create(s_find);
+    lv_obj_set_size(s_find_list, 380, 390);
+    lv_obj_set_pos(s_find_list, 15, 106);
+    lv_obj_set_style_bg_opa(s_find_list, 0, 0);
+    lv_obj_set_style_border_width(s_find_list, 0, 0);
+    lv_obj_set_style_pad_all(s_find_list, 4, 0);
+    lv_obj_set_flex_flow(s_find_list, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_find_list, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_row(s_find_list, 8, 0);
+    lv_obj_set_scroll_dir(s_find_list, LV_DIR_VER);
+    s_find_tm = lv_timer_create(find_paint, 300, NULL);
+    find_start();
 }
 
 void app_radio(lv_obj_t *root)
@@ -347,8 +505,9 @@ void app_radio(lv_obj_t *root)
     lv_obj_t *vp = ui_pill_btn(root, "+", C_CARD, 0xF9A8D4, 80, 56);
     lv_obj_set_pos(vp, 308, 340);
     lv_obj_add_event_cb(vp, rd_vol, LV_EVENT_CLICKED, (void *)(intptr_t)10);
-    lv_obj_t *n = ui_label(root, &font_cn16, 0x6B7280, "离开也会继续播；自订电台在手机设定网页填");
-    lv_obj_align(n, LV_ALIGN_BOTTOM_MID, 0, -26);
+    lv_obj_t *fs = ui_pill_btn(root, "找电台（新加坡／马来西亚）", C_CARD, 0xF9A8D4, 366, 52);
+    lv_obj_set_pos(fs, 22, 414);
+    lv_obj_add_event_cb(fs, find_open, LV_EVENT_CLICKED, NULL);
     rd_paint(NULL);
     s_rd_tm = lv_timer_create(rd_paint, 500, NULL);
     g_app_close = rd_close;

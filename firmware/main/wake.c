@@ -20,6 +20,9 @@ static volatile int s_users;            /* others recording right now */
 static volatile bool s_open;            /* the wake listener has the mic open */
 static TaskHandle_t s_task;
 static volatile bool s_heard;
+/* Mapping the model partition stops the cache for a moment, so it must run on a task whose stack
+ * is in internal RAM (app_main / the UI task), never on the PSRAM-stack wake task (0.9.3 crashed). */
+static srmodel_list_t *s_models;
 
 void mic_claim(void)
 {
@@ -49,8 +52,7 @@ static void fire_async(void *arg)
 
 static void wake_task(void *arg)
 {
-    srmodel_list_t *models = esp_srmodel_init("model");
-    char *name = models ? esp_srmodel_filter(models, ESP_WN_PREFIX, NULL) : NULL;
+    char *name = s_models ? esp_srmodel_filter(s_models, ESP_WN_PREFIX, NULL) : NULL;
     const esp_wn_iface_t *wn = name ? esp_wn_handle_from_name(name) : NULL;
     model_iface_data_t *md = wn ? wn->create(name, DET_MODE_90) : NULL;
     if (!md) { ESP_LOGE(TAG, "wakenet model not found"); s_task = NULL; vTaskDelete(NULL); return; }
@@ -109,6 +111,10 @@ static void wake_task(void *arg)
 void wake_apply(void)
 {
     if (g_safe_mode) return;
+    if (g_set.wake_on && !s_models) {
+        s_models = esp_srmodel_init("model");             /* called from app_main or the UI task: internal stack */
+        if (!s_models) { ESP_LOGE(TAG, "no model partition"); return; }
+    }
     if (g_set.wake_on && !s_task)
         xTaskCreateWithCaps(wake_task, "wake", 16384, NULL, 4, &s_task, MALLOC_CAP_SPIRAM);
     if (s_task) xTaskNotifyGive(s_task);

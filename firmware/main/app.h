@@ -69,6 +69,7 @@ typedef struct {
     uint8_t tap_buzz;       /* vibrate on button taps (off by default: the click sound is enough) */
     uint8_t wifi_keep;      /* WiFi stays connected all the time (faster 小智 etc.; uses more battery) */
     uint8_t wake_on;        /* "你好小智" wake word listens in the background (appended: keep field order) */
+    char radio_name[48];    /* name of the custom station (from 找电台), "" = 自订电台 */
 } settings_t;
 
 typedef struct { bool ok; float temp, tmax, tmin; int code, hum; char upd[8]; } weather_t;
