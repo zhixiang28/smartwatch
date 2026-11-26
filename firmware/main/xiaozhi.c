@@ -58,6 +58,7 @@ static volatile bool s_paused;                /* hands-free paused by a tap (or 
 static volatile bool s_relisten;              /* 小智 finished talking: listen again once the speaker is quiet */
 static volatile bool s_spk_busy;
 static int64_t s_listen_since;
+static volatile int64_t s_last_rx;           /* ms: last thing the server sent */
 static volatile int s_mode;                   /* 0 chat, 1 translate */
 static volatile bool s_need_save;
 static volatile bool s_mic_on, s_play;
@@ -299,6 +300,7 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         if (id != WEBSOCKET_EVENT_ERROR) xEventGroupSetBits(s_ev, EV_CLOSED);
         break;
     case WEBSOCKET_EVENT_DATA:
+        s_last_rx = esp_timer_get_time() / 1000;
         if (d->op_code == 0x1 || (d->op_code == 0x0 && s_txt_len)) {          /* text (maybe fragmented) */
             if (d->payload_offset == 0) s_txt_len = 0;
             if (!s_txt) s_txt = heap_caps_malloc(8192, MALLOC_CAP_SPIRAM);
@@ -487,16 +489,20 @@ static void ctl_task(void *arg)
                 EventBits_t b = xEventGroupWaitBits(s_ev, EV_CLOSED, pdTRUE, pdFALSE, pdMS_TO_TICKS(100));
                 if (b & EV_CLOSED) break;
                 if (!s_auto) continue;
-                if (s_relisten && !s_paused && !s_play && !s_spk_busy && !uxQueueMessagesWaiting(s_rxq)) {
+                /* 小智 finished (tts stop) and everything it sent has been played: listen again.
+                 * s_play stays true until here, so the last words aren't cut off. */
+                if (s_relisten && !s_paused && !s_spk_busy && !uxQueueMessagesWaiting(s_rxq)) {
                     s_relisten = false;
                     vTaskDelay(pdMS_TO_TICKS(300));       /* let the speaker's tail die out before the mic opens */
+                    s_play = false;
                     if (!s_paused && s_want) auto_listen();
                 }
                 if (s_st == XZ_LISTEN && !s_paused && now_ms() - s_listen_since > 120000) {
                     s_paused = true;                      /* 2 minutes of nothing: stop listening to save battery */
                     auto_pause();
                 }
-                if (s_st == XZ_THINK && !s_play && now_ms() - s_listen_since > 20000) s_relisten = true;   /* no answer came */
+                if ((s_st == XZ_THINK || s_st == XZ_SPEAK) && !s_relisten && !s_spk_busy && !uxQueueMessagesWaiting(s_rxq)
+                    && now_ms() - s_listen_since > 3000 && now_ms() - s_last_rx > 8000) s_relisten = true;   /* server went quiet without "tts stop": listen again anyway */
             }
             ws_close();
             s_play = false;
