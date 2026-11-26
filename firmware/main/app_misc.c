@@ -435,7 +435,7 @@ void app_findphone(lv_obj_t *root)
 }
 
 /* =============== Settings / about =============== */
-static lv_obj_t *s_to_lbl, *s_rem_lbl[3];
+static lv_obj_t *s_to_lbl, *s_rem_lbl[4];
 static void remind_paint(void)
 {
     lv_label_set_text(s_rem_lbl[0], g_set.remind_sit ? "久坐提醒：开" : "久坐提醒：关");
@@ -444,13 +444,20 @@ static void remind_paint(void)
     lv_obj_set_style_text_color(s_rem_lbl[1], lv_color_hex(g_set.remind_water ? C_TEAL : C_DIM), 0);
     lv_label_set_text(s_rem_lbl[2], g_set.tap_buzz ? "按键振动：开" : "按键振动：关");
     lv_obj_set_style_text_color(s_rem_lbl[2], lv_color_hex(g_set.tap_buzz ? C_TEAL : C_DIM), 0);
+    lv_label_set_text(s_rem_lbl[3], g_set.wake_on ? "你好小智唤醒：开" : "你好小智唤醒：关");
+    lv_obj_set_style_text_color(s_rem_lbl[3], lv_color_hex(g_set.wake_on ? C_TEAL : C_DIM), 0);
 }
 static void remind_cb(lv_event_t *e)
 {
     intptr_t k = (intptr_t)lv_event_get_user_data(e);
     if (k == 0) g_set.remind_sit = !g_set.remind_sit;
     else if (k == 1) g_set.remind_water = !g_set.remind_water;
-    else { g_set.tap_buzz = !g_set.tap_buzz; if (g_set.tap_buzz) hw_haptic(30); }
+    else if (k == 2) { g_set.tap_buzz = !g_set.tap_buzz; if (g_set.tap_buzz) hw_haptic(30); }
+    else {
+        g_set.wake_on = !g_set.wake_on;
+        wake_apply();
+        ui_toast(g_set.wake_on ? "说「你好小智」就会打开小智（比较耗电）" : "已关闭语音唤醒");
+    }
     remind_paint();
     store_save();
 }
@@ -502,16 +509,16 @@ void app_settings(lv_obj_t *root)
     set_row(root, 222, "SD 卡", store_sd_ok() ? "已插入" : "没有");
     set_row(root, 268, "训练", b2);
     s_rem_lbl[0] = NULL;
-    for (int i = 0; i < 3; i++) {
-        lv_obj_t *rb = ui_pill_btn(root, NULL, C_CARD, C_TEAL, 116, 56);
-        lv_obj_set_pos(rb, 22 + i * 125, 340);
+    for (int i = 0; i < 4; i++) {
+        lv_obj_t *rb = ui_pill_btn(root, NULL, C_CARD, C_TEAL, 180, 50);
+        lv_obj_set_pos(rb, 22 + (i % 2) * 186, 322 + (i / 2) * 58);
         s_rem_lbl[i] = ui_label(rb, &font_cn16, C_TEAL, "");
         lv_obj_center(s_rem_lbl[i]);
         lv_obj_add_event_cb(rb, remind_cb, LV_EVENT_CLICKED, (void *)(intptr_t)i);
     }
     remind_paint();
-    lv_obj_t *tb = ui_pill_btn(root, NULL, C_CARD, C_TEAL, 366, 62);
-    lv_obj_set_pos(tb, 22, 412);
+    lv_obj_t *tb = ui_pill_btn(root, NULL, C_CARD, C_TEAL, 366, 52);
+    lv_obj_set_pos(tb, 22, 440);
     s_to_lbl = ui_label(tb, &font_cn20, C_TEAL, "");
     lv_obj_center(s_to_lbl);
     lv_obj_add_event_cb(tb, timeout_cb, LV_EVENT_CLICKED, NULL);

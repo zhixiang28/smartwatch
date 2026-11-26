@@ -255,10 +255,11 @@ static lv_timer_t *s_rec_tm;
 
 static void rec_task(void *arg)
 {
+    mic_claim();
     esp_codec_dev_handle_t mic = bsp_audio_codec_microphone_init();
-    if (!mic) { s_recording = false; vTaskDelete(NULL); return; }
+    if (!mic) { s_recording = false; mic_release(); vTaskDelete(NULL); return; }
     esp_codec_dev_sample_info_t fs = { .sample_rate = REC_RATE, .channel = 4, .bits_per_sample = 16, .channel_mask = 0x0F };
-    if (esp_codec_dev_open(mic, &fs) != ESP_CODEC_DEV_OK) { s_recording = false; vTaskDelete(NULL); return; }
+    if (esp_codec_dev_open(mic, &fs) != ESP_CODEC_DEV_OK) { s_recording = false; mic_release(); vTaskDelete(NULL); return; }
     esp_codec_dev_set_in_gain(mic, 30.0f);
     int16_t frame[256 * 4];
     s_rec_len = 0;
@@ -267,6 +268,7 @@ static void rec_task(void *arg)
         for (int i = 0; i < 256; i++) s_rec[s_rec_len++] = frame[i * 4];     /* first microphone */
     }
     esp_codec_dev_close(mic);
+    mic_release();
     s_recording = false;
     vTaskDelete(NULL);
 }

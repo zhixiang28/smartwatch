@@ -68,6 +68,7 @@ typedef struct {
     uint8_t notif_on;       /* keep Bluetooth on for the Android notification app */
     uint8_t tap_buzz;       /* vibrate on button taps (off by default: the click sound is enough) */
     uint8_t wifi_keep;      /* WiFi stays connected all the time (faster 小智 etc.; uses more battery) */
+    uint8_t wake_on;        /* "你好小智" wake word listens in the background (appended: keep field order) */
 } settings_t;
 
 typedef struct { bool ok; float temp, tmax, tmin; int code, hum; char upd[8]; } weather_t;
@@ -236,7 +237,12 @@ int xz_state(void);                /* see xiaozhi.c, for the phone page */
 const char *xz_code(void);         /* pending activation code, "" if none */
 void xz_save_if_needed(void);      /* NVS writes deferred from PSRAM-stack tasks */
 bool radio_playing(void);
-void radio_mini_open(void);           /* floating music controls */
+void radio_mini_open(void);
+void mic_claim(void);                 /* recording: the wake-word listener lets go of the mic */
+void mic_release(void);
+void wake_apply(void);                /* start / stop the "你好小智" listener after g_set.wake_on changed */
+bool wake_listening(void);
+void xz_from_wake(void);              /* the next 小智 session was started by the wake word */           /* floating music controls */
 bool net_wifi_busy(void);
 void net_wifi_keep(bool on);          /* WiFi always connected, instead of on demand */
 void radio_stop(void);

@@ -53,6 +53,8 @@ static portMUX_TYPE s_txt_mux = portMUX_INITIALIZER_UNLOCKED;
 static volatile bool s_want;                  /* an app wants the session */
 static volatile int s_n_tx, s_n_rx;          /* voice frames sent / reply frames received (shown small) */
 static char s_last[40];                       /* last message type from the server */
+static volatile bool s_by_wake, s_greet;      /* this session was started by "你好小智" */
+static bool s_held;                           /* the 小智 screen holds the mic (wake listener off) */
 static volatile bool s_auto;                  /* 小智: hands-free (server detects the end of a sentence) */
 static volatile bool s_paused;                /* hands-free paused by a tap (or after 2 min of silence) */
 static volatile bool s_relisten;              /* 小智 finished talking: listen again once the speaker is quiet */
@@ -429,6 +431,8 @@ static void tx_task(void *arg)
     }
 }
 
+static void go_home_async(void *arg) { ui_go_home(); }
+void xz_from_wake(void) { s_by_wake = true; s_greet = true; }
 static int64_t now_ms(void) { return esp_timer_get_time() / 1000; }
 static void auto_listen(void)
 {
@@ -477,7 +481,14 @@ static void ctl_task(void *arg)
             if (!ok) break;                                   /* fail() already said why */
             s_lost = false;
             s_listening = false;
-            if (s_auto) { if (s_paused) s_st = XZ_READY; else auto_listen(); }
+            if (s_auto && s_greet) {
+                /* woken by "你好小智": tell the server, it answers with a greeting, then we listen */
+                s_greet = false;
+                send_json("{\"session_id\":\"%s\",\"type\":\"listen\",\"state\":\"detect\",\"text\":\"你好小智\"%s}", NULL);
+                s_st = XZ_THINK;
+                s_listen_since = now_ms();
+            }
+            else if (s_auto) { if (s_paused) s_st = XZ_READY; else auto_listen(); }
             else if (s_want_listen) { send_listen_start(); s_st = XZ_LISTEN; }
             else if (!s_mic_on && s_listening == false && uxQueueMessagesWaiting(s_txq)) {
                 /* released before we got connected: send what was said, then stop */
@@ -497,9 +508,10 @@ static void ctl_task(void *arg)
                     s_play = false;
                     if (!s_paused && s_want) auto_listen();
                 }
-                if (s_st == XZ_LISTEN && !s_paused && now_ms() - s_listen_since > 120000) {
-                    s_paused = true;                      /* 2 minutes of nothing: stop listening to save battery */
+                if (s_st == XZ_LISTEN && !s_paused && now_ms() - s_listen_since > (s_by_wake ? 30000 : 120000)) {
+                    s_paused = true;                      /* nothing said for a while: stop listening to save battery */
                     auto_pause();
+                    if (s_by_wake && ui_lock(500)) { lv_async_call(go_home_async, NULL); ui_unlock(); }   /* back to the watch face */
                 }
                 if ((s_st == XZ_THINK || s_st == XZ_SPEAK) && !s_relisten && !s_spk_busy && !uxQueueMessagesWaiting(s_rxq)
                     && now_ms() - s_listen_since > 3000 && now_ms() - s_last_rx > 8000) s_relisten = true;   /* server went quiet without "tts stop": listen again anyway */
@@ -539,9 +551,10 @@ static void mic_task(void *arg)
     for (;;) {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
         if (!s_mic_on || !enc || !frame || !pcm16 || !opus) continue;
+        mic_claim();
         esp_codec_dev_handle_t mic = bsp_audio_codec_microphone_init();
         esp_codec_dev_sample_info_t fs = { .sample_rate = 24000, .channel = 4, .bits_per_sample = 16, .channel_mask = 0x0F };
-        if (!mic || esp_codec_dev_open(mic, &fs) != ESP_CODEC_DEV_OK) { ESP_LOGW(TAG, "mic open failed"); continue; }
+        if (!mic || esp_codec_dev_open(mic, &fs) != ESP_CODEC_DEV_OK) { ESP_LOGW(TAG, "mic open failed"); mic_release(); continue; }
         esp_codec_dev_set_in_gain(mic, 30.0f);
         s_mic_busy = true;
         int n16 = 0;
@@ -575,6 +588,7 @@ static void mic_task(void *arg)
             prev = frame[255 * 4];
         }
         esp_codec_dev_close(mic);
+        mic_release();
         s_mic_busy = false;
     }
 }
@@ -827,6 +841,7 @@ static void xz_open(int mode)
     set_txt(s_bot, sizeof(s_bot), "");
     if (!xz_tasks()) { fail("内存不足"); return; }
     if (radio_playing()) radio_stop();                     /* one thing on the speaker at a time */
+    if (!s_held) { s_held = true; mic_claim(); }          /* no wake-word listening while this screen is open */
     s_mode = mode;
     s_auto = mode == 0;
     s_paused = false;
@@ -837,6 +852,9 @@ static void xz_open(int mode)
 
 static void xz_shut(void)
 {
+    if (s_held) { s_held = false; mic_release(); }
+    s_by_wake = false;
+    s_greet = false;
     s_want = false;
     s_want_listen = false;
     s_mic_on = false;

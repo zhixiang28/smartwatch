@@ -92,7 +92,8 @@ void app_main(void)
         if (ui_lock(1000)) { ui_toast(t); ui_unlock(); }
     }
     if (!g_safe_mode && diag_has_dump() && diag_summary()[0] && ui_lock(1000)) { crash_screen(); ui_unlock(); }
-    if (g_set.notif_on) ble_start();     /* the notification app reconnects by itself */
+    if (g_set.notif_on) ble_start();
+    wake_apply();                        /* "你好小智" listener, if switched on */     /* the notification app reconnects by itself */
     hw_haptic(40);
     xTaskCreate(stable_task, "stable", 4096, NULL, 2, NULL);
 }
