@@ -67,6 +67,7 @@ typedef struct {
     uint16_t pair_code;     /* kept, so the phone page / Android app needn't re-enter it */
     uint8_t notif_on;       /* keep Bluetooth on for the Android notification app */
     uint8_t tap_buzz;       /* vibrate on button taps (off by default: the click sound is enough) */
+    uint8_t wifi_keep;      /* WiFi stays connected all the time (faster 小智 etc.; uses more battery) */
 } settings_t;
 
 typedef struct { bool ok; float temp, tmax, tmin; int code, hum; char upd[8]; } weather_t;
@@ -237,6 +238,7 @@ void xz_save_if_needed(void);      /* NVS writes deferred from PSRAM-stack tasks
 bool radio_playing(void);
 void radio_mini_open(void);           /* floating music controls */
 bool net_wifi_busy(void);
+void net_wifi_keep(bool on);          /* WiFi always connected, instead of on demand */
 void radio_stop(void);
 void reminders_check(void);
 void tank_attention(const char *msg);

@@ -19,7 +19,7 @@ static bool s_wifi_on = true;
 static bool get_state(int i)
 {
     switch (i) {
-    case 0: return s_wifi_on;
+    case 0: return s_wifi_on;                       /* 自动 and 常开 both light up; the label tells them apart */
     case 1: return g_set.dnd;
     case 3: return g_set.mute;
     case 4: return g_set.power_save;
@@ -38,6 +38,7 @@ static void paint(int i)
     lv_obj_set_style_image_recolor(ic, lv_color_hex(fg), 0);
     lv_obj_t *lb = lv_obj_get_child(s_tile[i], 1);
     if (lb) lv_obj_set_style_text_color(lb, lv_color_hex(fg), 0);
+    if (i == 0 && lb) lv_label_set_text(lb, !s_wifi_on ? "WiFi关" : g_set.wifi_keep ? "WiFi常开" : "WiFi自动");
 }
 
 static void tile_cb(lv_event_t *e)
@@ -45,7 +46,11 @@ static void tile_cb(lv_event_t *e)
     int i = (int)(intptr_t)lv_event_get_user_data(e);
     if (i < 0 || i > 5) return;
     switch (i) {
-    case 0: s_wifi_on = !s_wifi_on; net_wifi_enable(s_wifi_on); break;
+    case 0:                                         /* 自动 (on demand) -> 常开 -> 关 -> 自动 */
+        if (s_wifi_on && !g_set.wifi_keep) { g_set.wifi_keep = 1; net_wifi_keep(true); }
+        else if (s_wifi_on) { g_set.wifi_keep = 0; net_wifi_keep(false); s_wifi_on = false; net_wifi_enable(false); }
+        else { s_wifi_on = true; net_wifi_enable(true); }
+        break;
     case 1: g_set.dnd = !g_set.dnd; break;
     case 2: ui_open_app(app_flashlight, lv_color_white()); return;
     case 3: g_set.mute = !g_set.mute; break;
@@ -55,7 +60,8 @@ static void tile_cb(lv_event_t *e)
     hw_haptic(15);
     sound_play(SND_CLICK);
     paint(i);
-    if (i == 4) lv_label_set_text(s_info, g_set.power_save ? "省电：极简表盘、关 WiFi、5 秒熄屏" : "省电：关");
+    if (i == 0) lv_label_set_text(s_info, !s_wifi_on ? "WiFi：关（要用时也不会开）" : g_set.wifi_keep ? "WiFi：常开（小智更快，比较耗电）" : "WiFi：自动（要用时才开）");
+    else if (i == 4) lv_label_set_text(s_info, g_set.power_save ? "省电：极简表盘、关 WiFi、5 秒熄屏" : "省电：关");
     else lv_label_set_text_fmt(s_info, "%s：%s", TILES[i].name, get_state(i) ? "开" : "关");
     store_save();
 }

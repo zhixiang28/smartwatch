@@ -331,9 +331,11 @@ static bool try_join(void)
 
 /* WiFi is only switched on while something needs it (time sync, weather, office
  * light, adding a network) and switched off 45 s after the last job finishes. */
+static volatile bool s_keep;               /* "WiFi 常开": never switch off when idle */
 static void radio_off_cb(void *arg)
 {
     bool off = false;
+    if (s_keep) return;
     radio_lock();
     if (s_users == 0 && s_radio_on) {          /* re-checked under the lock: a job may have just started */
         s_leaving = true;
@@ -400,7 +402,7 @@ static void mgr_task(void *arg)
             fails = 0;
             continue;
         }
-        if (s_radio_on && s_wifi_enabled && !s_wifi_up && s_nnets && s_users > 0) {
+        if (s_radio_on && s_wifi_enabled && !s_wifi_up && s_nnets && (s_users > 0 || s_keep)) {
             if (try_join()) fails = 0;
             else if (++fails >= 3) { fails = 0; ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(30000)); }
             else ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1000));      /* a failed scan returns at once: don't spin */
@@ -512,6 +514,14 @@ void net_wifi_reconnect(void)
     if (s_mgr) xTaskNotifyGive(s_mgr);
 }
 
+void net_wifi_keep(bool on)
+{
+    s_keep = on;
+    if (on) { if (s_off_timer) esp_timer_stop(s_off_timer); radio_up(); }
+    else if (s_users == 0 && s_off_timer) { esp_timer_stop(s_off_timer); esp_timer_start_once(s_off_timer, 45 * 1000000); }
+    notify_ui();
+}
+
 void net_wifi_enable(bool on)
 {
     if (on == s_wifi_enabled) return;
@@ -520,7 +530,7 @@ void net_wifi_enable(bool on)
         radio_lock();
         if (s_radio_on) { s_leaving = true; esp_wifi_disconnect(); esp_wifi_stop(); s_radio_on = false; s_wifi_up = false; }
         radio_unlock();
-    } else if (s_users > 0) radio_up();
+    } else if (s_users > 0 || s_keep) radio_up();
 }
 
 void net_init(void)
@@ -559,6 +569,7 @@ void net_init(void)
     s_wifi_started = true;
     if (g_set.power_save) s_wifi_enabled = false;
     xTaskCreate(mgr_task, "wifi_mgr", 4096, NULL, 3, &s_mgr);
+    if (g_set.wifi_keep) net_wifi_keep(true);
     net_time_sync();
 }
 
