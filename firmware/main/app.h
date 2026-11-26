@@ -141,6 +141,8 @@ bool net_wifi_connected(void);
 const char *net_wifi_ssid(void);
 void net_wifi_enable(bool on);
 void net_wifi_use(bool on);            /* reference-counted: WiFi is on only while used */
+struct esp_http_client;
+void net_err_text(struct esp_http_client *c, int err, char *out, int n);   /* why a request failed, in words */
 bool net_wait_connected(int ms);
 void net_time_sync(void);
 const char *net_last_error(void);

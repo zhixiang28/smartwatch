@@ -1,3 +1,4 @@
+#include "esp_pm.h"
 #include <string.h>
 #include <stdlib.h>
 #include <sys/time.h>
@@ -353,13 +354,25 @@ static void radio_up(void)
     net_wifi_reconnect();
 }
 
+/* While a feature is actively using the network (radio, 小智, lights): no WiFi modem sleep and
+ * CPU at 240 MHz. Modem sleep + 80 MHz made streams stutter and TLS handshakes time out. */
+static esp_pm_lock_handle_t s_pm_net;
+static void perf(bool on)
+{
+    if (!s_pm_net) esp_pm_lock_create(ESP_PM_CPU_FREQ_MAX, 0, "net", &s_pm_net);
+    if (on) { if (s_pm_net) esp_pm_lock_acquire(s_pm_net); esp_wifi_set_ps(WIFI_PS_NONE); }
+    else { esp_wifi_set_ps(WIFI_PS_MIN_MODEM); if (s_pm_net) esp_pm_lock_release(s_pm_net); }
+}
+
 void net_wifi_use(bool on)
 {
     if (on) {
-        users_add(1);
+        if (users_add(1) == 1) perf(true);
         if (s_off_timer) esp_timer_stop(s_off_timer);
         radio_up();
-    } else if (users_add(-1) == 0 && s_off_timer) {
+    } else if (s_users > 0 && users_add(-1) == 0) {
+        perf(false);
+        if (!s_off_timer) return;
         esp_timer_stop(s_off_timer);
         esp_timer_start_once(s_off_timer, 45 * 1000000);     /* stays on a while: the next tap needn't wait */
     }
@@ -639,4 +652,29 @@ void net_weather_refresh(void)
     if (!s_nnets || !s_wifi_enabled || s_wx_busy) return;
     s_wx_busy = true;
     if (xTaskCreate(wx_task, "wx", 6144, NULL, 3, NULL) != pdPASS) s_wx_busy = false;
+}
+
+#include "esp_tls_errors.h"
+#include "esp_heap_caps.h"
+void net_err_text(struct esp_http_client *c, int err, char *out, int n)
+{
+    int code = 0, flags = 0;
+    esp_err_t tls = c ? esp_http_client_get_and_clear_last_tls_error(c, &code, &flags) : ESP_OK;
+    const char *why;
+    switch (tls) {
+    case ESP_ERR_ESP_TLS_CANNOT_RESOLVE_HOSTNAME: why = "找不到服务器网址（DNS）"; break;
+    case ESP_ERR_ESP_TLS_FAILED_CONNECT_TO_HOST:  why = "服务器不回应"; break;
+    case ESP_ERR_ESP_TLS_CONNECTION_TIMEOUT:      why = "连线超时"; break;
+    case ESP_ERR_ESP_TLS_CANNOT_CREATE_SOCKET:    why = "开不了连线"; break;
+    case ESP_ERR_MBEDTLS_SSL_SETUP_FAILED:
+    case ESP_ERR_MBEDTLS_SSL_CONFIG_DEFAULTS_FAILED: why = "加密准备失败（内存？）"; break;
+    case ESP_ERR_MBEDTLS_SSL_HANDSHAKE_FAILED:    why = "加密握手失败"; break;
+    case ESP_ERR_MBEDTLS_X509_CRT_PARSE_FAILED:
+    case ESP_ERR_MBEDTLS_CERT_PARTLY_OK:          why = "证书不对（手表时间对吗？）"; break;
+    default:                                      why = esp_err_to_name(err); break;
+    }
+    snprintf(out, n, "%s · 内存 %uK/%uK", why,
+             (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024),
+             (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM) / 1024));
+    if (code) { int l = strlen(out); snprintf(out + l, n - l, " (-0x%x)", -code); }
 }

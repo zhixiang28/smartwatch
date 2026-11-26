@@ -103,16 +103,18 @@ static const station_t STATIONS[] = {
     {"BBC World Service", "http://stream.live.vc.bbcmedia.co.uk/bbc_world_service"},
 };
 #define N_BUILTIN (int)(sizeof(STATIONS) / sizeof(STATIONS[0]))
-#define RD_BUF (64 * 1024)
-#define RD_PREBUF (24 * 1024)
+#define RD_BUF (192 * 1024)      /* ~12 s at 128 kbps: rides out WiFi hiccups */
+#define RD_PREBUF (48 * 1024)    /* ~3 s before it starts (and again after running dry) */
 
 static const char *RTAG = "radio";
 static StreamBufferHandle_t s_rd_sb;
 static TaskHandle_t s_rd_reader, s_rd_decoder;
 static volatile bool s_rd_play;          /* user wants it playing */
 static volatile int s_rd_gen;            /* bumps on every start/stop: old loops notice and quit */
+static int s_rd_drops, s_rd_started = -1;                 /* reconnects in a row */
 static volatile int s_rd_state;          /* 0 idle 1 wifi 2 connecting 3 buffering 4 playing 5 error */
 static char s_rd_err[64];
+static char s_rd_why[96];
 static lv_obj_t *s_rd_name, *s_rd_st, *s_rd_vol, *s_rd_btn;
 static lv_timer_t *s_rd_tm;
 
@@ -144,7 +146,14 @@ static void reader_task(void *arg)
             c = esp_http_client_init(&cfg);
             if (!c) break;
             esp_http_client_set_header(c, "Icy-MetaData", "0");
-            if (esp_http_client_open(c, 0) != ESP_OK) { esp_http_client_cleanup(c); c = NULL; break; }
+            esp_err_t oe = ESP_FAIL;
+            for (int t = 0; t < 3 && gen == s_rd_gen; t++) {
+                if ((oe = esp_http_client_open(c, 0)) == ESP_OK) break;
+                net_err_text(c, oe, s_rd_why, sizeof(s_rd_why));
+                esp_http_client_close(c);
+                vTaskDelay(pdMS_TO_TICKS(800 * (t + 1)));
+            }
+            if (oe != ESP_OK) { esp_http_client_cleanup(c); c = NULL; break; }
             esp_http_client_fetch_headers(c);
             status = esp_http_client_get_status_code(c);
             if (status >= 301 && status <= 308) {
@@ -158,23 +167,34 @@ static void reader_task(void *arg)
             break;
         }
         if (!c || status != 200) {
-            char m[64]; snprintf(m, sizeof(m), "电台连不上（%d）", status); rd_fail(m);
+            char m[64];
+            if (status) snprintf(m, sizeof(m), "电台连不上（%d）", status);
+            else snprintf(m, sizeof(m), "电台连不上：%s", s_rd_why);
+            rd_fail(m);
             if (c) { esp_http_client_close(c); esp_http_client_cleanup(c); }
             net_wifi_use(false);
             continue;
         }
-        s_rd_state = 3;
-        xStreamBufferReset(s_rd_sb);
-        xTaskNotifyGive(s_rd_decoder);
+        if (s_rd_started != gen) {                          /* fresh start (not a reconnect mid-play) */
+            s_rd_started = gen;
+            s_rd_state = 3;
+            xStreamBufferReset(s_rd_sb);
+            xTaskNotifyGive(s_rd_decoder);
+        }
         while (s_rd_play && gen == s_rd_gen) {
             int r = esp_http_client_read(c, buf, 4096);
-            if (r <= 0) { if (s_rd_play && gen == s_rd_gen) rd_fail("电台断线了"); break; }
+            if (r <= 0) break;                          /* dropped: reconnect below while the buffer plays */
             for (int off = 0; off < r && s_rd_play && gen == s_rd_gen;)
                 off += xStreamBufferSend(s_rd_sb, buf + off, r - off, pdMS_TO_TICKS(500));
+            s_rd_drops = 0;
         }
         esp_http_client_close(c);
         esp_http_client_cleanup(c);
         net_wifi_use(false);
+        if (s_rd_play && gen == s_rd_gen) {               /* still wanted: connect again */
+            if (++s_rd_drops <= 8) { vTaskDelay(pdMS_TO_TICKS(500)); xTaskNotifyGive(s_rd_reader); continue; }
+            rd_fail("电台一直断线，换一台试试");
+        }
         if (gen == s_rd_gen && s_rd_state != 5) s_rd_state = 0;
     }
 }
@@ -198,7 +218,9 @@ static void decoder_task(void *arg)
             have += xStreamBufferReceive(s_rd_sb, in + have, 8192 - have, pdMS_TO_TICKS(have < 2048 ? 2000 : 0));
             if (have < 1024) {
                 if (s_rd_state == 5 || !s_rd_play || gen != s_rd_gen) break;
-                s_rd_state = 3;                                         /* starved: show buffering */
+                s_rd_state = 3;                                         /* starved: fill up again, then play smoothly */
+                while (s_rd_play && gen == s_rd_gen && s_rd_state != 5 && xStreamBufferBytesAvailable(s_rd_sb) < RD_PREBUF / 2)
+                    vTaskDelay(pdMS_TO_TICKS(50));
                 continue;
             }
             int sync = MP3FindSyncWord(in, have);

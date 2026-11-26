@@ -44,7 +44,7 @@ static const char *TAG = "xiaozhi";
 
 enum { XZ_OFF, XZ_WIFI, XZ_CHECK, XZ_ACTIVATE, XZ_CONNECT, XZ_READY, XZ_LISTEN, XZ_THINK, XZ_SPEAK, XZ_ERROR };
 static volatile int s_st;
-static char s_err[96];
+static char s_err[200];
 static char s_code[16];                       /* activation code while not yet bound */
 static char s_user[240], s_bot[480];          /* last thing said by the user / by 小智 */
 static portMUX_TYPE s_txt_mux = portMUX_INITIALIZER_UNLOCKED;
@@ -105,6 +105,7 @@ static void ensure_uuid(void)
 static const char *ota_url(void) { return g_set.xz_ota[0] ? g_set.xz_ota : XZ_OTA_DEFAULT; }
 
 /* POST to the OTA server; returns HTTP status, body in out (NUL-terminated). */
+static char s_neterr[96];
 static int ota_post(const char *url, const char *body, char *out, int outlen)
 {
     char mac[20], ua[48];
@@ -121,7 +122,16 @@ static int ota_post(const char *url, const char *body, char *out, int outlen)
     esp_http_client_set_header(c, "Accept-Language", "zh-CN");
     esp_http_client_set_header(c, "Content-Type", "application/json");
     int st = -1, len = 0;
-    if (esp_http_client_open(c, strlen(body)) == ESP_OK) {
+    esp_err_t e = ESP_FAIL;
+    for (int tries = 0; tries < 3 && s_want; tries++) {
+        e = esp_http_client_open(c, strlen(body));
+        if (e == ESP_OK) break;
+        net_err_text(c, e, s_neterr, sizeof(s_neterr));
+        ESP_LOGW(TAG, "ota open: %s", s_neterr);
+        esp_http_client_close(c);
+        vTaskDelay(pdMS_TO_TICKS(1000 * (tries + 1)));
+    }
+    if (e == ESP_OK) {
         esp_http_client_write(c, body, strlen(body));
         esp_http_client_fetch_headers(c);
         st = esp_http_client_get_status_code(c);
@@ -153,7 +163,10 @@ static int check_server(void)
     int st = ota_post(ota_url(), body, resp, 4096);
     int ret = -1;
     if (st != 200) {
-        char m[64]; snprintf(m, sizeof(m), "小智服务器连不上（%d）", st); fail(m);
+        char m[160];
+        if (st < 0) snprintf(m, sizeof(m), "小智服务器连不上\n%s", s_neterr);
+        else snprintf(m, sizeof(m), "小智服务器连不上（%d）", st);
+        fail(m);
     } else {
         cJSON *j = cJSON_Parse(resp);
         cJSON *act = j ? cJSON_GetObjectItem(j, "activation") : NULL;
@@ -291,7 +304,11 @@ static bool ws_open(void)
     esp_websocket_register_events(s_ws, WEBSOCKET_EVENT_ANY, ws_event, NULL);
     if (esp_websocket_client_start(s_ws) != ESP_OK) { ws_close(); fail("开不了连线"); return false; }
     EventBits_t b = xEventGroupWaitBits(s_ev, EV_CONNECTED | EV_CLOSED, pdFALSE, pdFALSE, pdMS_TO_TICKS(12000));
-    if (!(b & EV_CONNECTED)) { ws_close(); fail("连不上小智服务器"); return false; }
+    if (!(b & EV_CONNECTED)) {
+        ws_close();
+        char m[96]; snprintf(m, sizeof(m), "连不上小智对话服务器（内部内存剩 %uK）", (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024));
+        fail(m); return false;
+    }
     char hello[200];
     int n = snprintf(hello, sizeof(hello), "{\"type\":\"hello\",\"version\":1,\"features\":{\"mcp\":true},\"transport\":\"websocket\","
                      "\"audio_params\":{\"format\":\"opus\",\"sample_rate\":16000,\"channels\":1,\"frame_duration\":60}}");
