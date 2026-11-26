@@ -151,11 +151,17 @@ typedef struct { esp_tls_t *tls; char hdr[3072]; int pre_off, pre; } rs_t;
 
 static void rs_close(rs_t *r) { if (r->tls) { esp_tls_conn_destroy(r->tls); r->tls = NULL; } }
 
-static const char *hdr_val(const char *h, const char *name)       /* value of "Name:" (case-insensitive) */
+/* value of "Name:" (case-insensitive) in a header block whose lines end in \n (\r already removed) */
+static const char *hdr_val(const char *h, const char *name)
 {
     size_t n = strlen(name);
-    for (const char *p = h; p && *p; p = strstr(p, "\r\n") ? strstr(p, "\r\n") + 2 : NULL) {
-        if (!strncasecmp(p, name, n) && p[n] == ':') { p += n + 1; while (*p == ' ') p++; return p; }
+    for (const char *p = h; p && *p; p = strchr(p, '\n') ? strchr(p, '\n') + 1 : NULL) {
+        while (*p == ' ' || *p == '\t') p++;
+        if (!strncasecmp(p, name, n)) {
+            const char *q = p + n;
+            while (*q == ' ') q++;
+            if (*q == ':') { q++; while (*q == ' ') q++; return q; }
+        }
     }
     return NULL;
 }
@@ -214,19 +220,22 @@ static int rs_open(char *url, rs_t *rs, int gen)
             if (r <= 0) break;
             len += r;
             rs->hdr[len] = 0;
-            if ((end = strstr(rs->hdr, "\r\n\r\n"))) break;
+            if ((end = strstr(rs->hdr, "\r\n\r\n")) || (end = strstr(rs->hdr, "\n\n"))) break;
         }
-        if (!end) { rs_close(rs); snprintf(s_rd_why, sizeof(s_rd_why), "电台没有回应"); return -1; }
+        if (!end) { rs_close(rs); snprintf(s_rd_why, sizeof(s_rd_why), "电台没有回应"); ESP_LOGW(RTAG, "no header end: %.200s", rs->hdr); return -1; }
+        int gap = end[0] == '\r' ? 4 : 2;
         *end = 0;
-        rs->pre_off = end + 4 - rs->hdr;
+        rs->pre_off = end + gap - rs->hdr;
         rs->pre = len - rs->pre_off;
+        for (char *w = rs->hdr, *r2 = rs->hdr; ; r2++) { if (*r2 != '\r') *w++ = *r2; if (!*r2) break; }   /* drop \r */
+        ESP_LOGI(RTAG, "reply: %.300s", rs->hdr);
         const char *sp = strchr(rs->hdr, ' ');           /* "HTTP/1.1 200 OK" or "ICY 200 OK" */
         int status = sp ? atoi(sp + 1) : 0;
         if (status >= 301 && status <= 308) {
-            const char *loc = hdr_val(strstr(rs->hdr, "\r\n") ? strstr(rs->hdr, "\r\n") + 2 : "", "Location");
+            const char *loc = hdr_val(rs->hdr, "Location");
             char nu[256];
             if (loc) {
-                int ll = strcspn(loc, "\r\n");
+                int ll = strcspn(loc, "\n");
                 if (loc[0] == '/') snprintf(nu, sizeof(nu), "%s://%s:%d%.*s", https ? "https" : "http", host, port, ll, loc);   /* relative */
                 else snprintf(nu, sizeof(nu), "%.*s", ll, loc);
             }
@@ -238,9 +247,9 @@ static int rs_open(char *url, rs_t *rs, int gen)
             continue;
         }
         if (status != 200) { rs_close(rs); return status ? status : -1; }
-        const char *ct = hdr_val(strstr(rs->hdr, "\r\n") ? strstr(rs->hdr, "\r\n") + 2 : "", "Content-Type");
+        const char *ct = hdr_val(rs->hdr, "Content-Type");
         char ctb[48] = "?";
-        if (ct) snprintf(ctb, sizeof(ctb), "%.*s", (int)strcspn(ct, "\r\n"), ct);
+        if (ct) snprintf(ctb, sizeof(ctb), "%.*s", (int)strcspn(ct, "\n"), ct);
         s_rd_aac = strcasestr(ctb, "aac") || strstr(url, ".aac") || strstr(url, "AAC") || strcasestr(ctb, "mp4a");
         ESP_LOGI(RTAG, "stream %s (%s) %s", s_rd_aac ? "AAC" : "MP3", ctb, url);
         return 200;
@@ -331,8 +340,28 @@ static void decoder_task(void *arg)
         int have = 0;
         uint32_t phase = 0;                                             /* resampler position, 16.16 */
         int16_t last = 0;
+        bool sniffed = false, logged = false;
+        int errs = 0, frames = 0;
         while (s_rd_play && gen == s_rd_gen) {
             have += xStreamBufferReceive(s_rd_sb, in + have, 8192 - have, pdMS_TO_TICKS(have < 2048 ? 2000 : 0));
+            if (!sniffed && have >= 4096) {
+                /* trust the bytes over the headers: ADTS (AAC) syncs as FFF with layer 00, MP3 as FFE with layer != 00 */
+                int a = 0, m = 0;
+                for (int i = 0; i + 1 < have; i++) {
+                    if (in[i] != 0xFF) continue;
+                    uint8_t b = in[i + 1];
+                    if ((b & 0xF6) == 0xF0) a++;
+                    else if ((b & 0xE0) == 0xE0 && (b & 0x06)) m++;
+                }
+                bool want_aac = a > m;
+                if (want_aac != is_aac) {
+                    ESP_LOGI(RTAG, "data looks like %s (adts %d / mp3 %d)", want_aac ? "AAC" : "MP3", a, m);
+                    is_aac = want_aac;
+                    if (is_aac && !aac) aac = AACInitDecoder();
+                    if (is_aac && !aac) { rd_fail("内存不足"); break; }
+                }
+                sniffed = true;
+            }
             if (have < 1024) {
                 if (s_rd_state == 5 || !s_rd_play || gen != s_rd_gen) break;
                 s_rd_state = 3;                                         /* starved: fill up again, then play smoothly */
@@ -350,7 +379,7 @@ static void decoder_task(void *arg)
                 memmove(in, p, left);
                 have = left;
                 if (err == ERR_AAC_INDATA_UNDERFLOW) continue;
-                if (err) { if (have) memmove(in, in + 1, --have); continue; }    /* skip a bad frame */
+                if (err) { if (++errs % 50 == 1) ESP_LOGW(RTAG, "aac error %d (x%d, %d ok)", err, errs, frames); if (have) memmove(in, in + 1, --have); continue; }
                 AACFrameInfo fi;
                 AACGetLastFrameInfo(aac, &fi);
                 rate = fi.sampRateOut; ch = fi.nChans; nout = fi.outputSamps;
@@ -370,6 +399,8 @@ static void decoder_task(void *arg)
                 rate = fi.samprate; ch = fi.nChans; nout = fi.outputSamps;
             }
             if (rate <= 0 || nout <= 0 || ch <= 0) continue;
+            frames++;
+            if (!logged) { logged = true; ESP_LOGI(RTAG, "decoding %s %d Hz x%d", is_aac ? "AAC" : "MP3", rate, ch); }
             int n = nout / ch;
             if (ch == 2) for (int i = 0; i < n; i++) pcm[i] = (pcm[2 * i] + pcm[2 * i + 1]) / 2;
             /* linear resample to the speaker's 24 kHz */
