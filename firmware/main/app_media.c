@@ -94,9 +94,20 @@ void app_camera(lv_obj_t *root)
 #include "freertos/stream_buffer.h"
 #include "freertos/idf_additions.h"
 #include "mp3dec.h"
+#include "aacdec.h"
+#include "cJSON.h"
 
-typedef struct { const char *name; const char *url; } station_t;
+/* q/cc: looked up by name in the Radio Browser directory when played (stream addresses change);
+ * url is the fallback if that lookup fails. */
+typedef struct { const char *name; const char *url; const char *q; const char *cc; } station_t;
+#define STW "http://playerservices.streamtheworld.com/api/livestream-redirect/"
 static const station_t STATIONS[] = {
+    {"YES 933", STW "YES933AAC.aac", "YES 933", "SG"},
+    {"Capital 958", STW "CAPITAL958FMAAC.aac", "958", "SG"},
+    {"Love 972", STW "LOVE972FMAAC.aac", "972", "SG"},
+    {"MY FM", STW "MY_FMAAC.aac", "MY FM", "MY"},
+    {"988", STW "988_FMAAC.aac", "988", "MY"},
+    {"BFM 89.9", STW "BFM899_AAC.aac", "BFM", "MY"},
     {"Radio Paradise", "http://stream.radioparadise.com/mp3-128"},
     {"SomaFM Groove Salad", "http://ice1.somafm.com/groovesalad-128-mp3"},
     {"SomaFM Lush", "http://ice1.somafm.com/lush-128-mp3"},
@@ -111,7 +122,8 @@ static StreamBufferHandle_t s_rd_sb;
 static TaskHandle_t s_rd_reader, s_rd_decoder;
 static volatile bool s_rd_play;          /* user wants it playing */
 static volatile int s_rd_gen;            /* bumps on every start/stop: old loops notice and quit */
-static int s_rd_drops, s_rd_started = -1;                 /* reconnects in a row */
+static int s_rd_drops, s_rd_started = -1;
+static volatile bool s_rd_aac;          /* this stream is AAC / HE-AAC (ADTS), else MP3 */                 /* reconnects in a row */
 static volatile int s_rd_state;          /* 0 idle 1 wifi 2 connecting 3 buffering 4 playing 5 error */
 static char s_rd_err[64];
 static char s_rd_why[96];
@@ -125,6 +137,10 @@ bool radio_playing(void) { return s_rd_play; }
 
 static void rd_fail(const char *m) { snprintf(s_rd_err, sizeof(s_rd_err), "%s", m); s_rd_state = 5; ESP_LOGW(RTAG, "%s", m); }
 
+static char s_resolved[16][128];         /* built-in stations: address found in the directory this boot */
+static int rb_get(const char *path, char *buf, int cap);
+static bool rb_playable(void *station_json, const char **url);
+static void rb_lookup(const char *q, const char *cc, char *out, int outlen);
 static void reader_task(void *arg)
 {
     char *buf = heap_caps_malloc(4096, MALLOC_CAP_SPIRAM);
@@ -137,7 +153,12 @@ static void reader_task(void *arg)
         if (!net_wait_connected(30000)) { rd_fail("WiFi 连不上"); net_wifi_use(false); continue; }
         s_rd_state = 2;
         char url[160];
-        snprintf(url, sizeof(url), "%s", rd_url(g_set.radio_station));
+        int st_i = g_set.radio_station;
+        snprintf(url, sizeof(url), "%s", rd_url(st_i));
+        if (st_i < N_BUILTIN && STATIONS[st_i].q) {
+            if (!s_resolved[st_i][0]) rb_lookup(STATIONS[st_i].q, STATIONS[st_i].cc, s_resolved[st_i], sizeof(s_resolved[st_i]));
+            if (s_resolved[st_i][0]) snprintf(url, sizeof(url), "%s", s_resolved[st_i]);
+        }
         esp_http_client_handle_t c = NULL;
         int status = 0;
         for (int hop = 0; hop < 4 && gen == s_rd_gen; hop++) {        /* follow up to 3 redirects */
@@ -156,6 +177,12 @@ static void reader_task(void *arg)
             if (oe != ESP_OK) { esp_http_client_cleanup(c); c = NULL; break; }
             esp_http_client_fetch_headers(c);
             status = esp_http_client_get_status_code(c);
+            if (status == 200) {
+                char *ct = NULL;
+                esp_http_client_get_header(c, "Content-Type", &ct);
+                s_rd_aac = (ct && strstr(ct, "aac")) || strstr(url, ".aac") || strstr(url, "AAC");
+                ESP_LOGI(RTAG, "stream %s (%s)", s_rd_aac ? "AAC" : "MP3", ct ? ct : "?");
+            }
             if (status >= 301 && status <= 308) {
                 char *loc = NULL;
                 esp_http_client_get_header(c, "Location", &loc);
@@ -201,16 +228,20 @@ static void reader_task(void *arg)
 
 static void decoder_task(void *arg)
 {
-    HMP3Decoder dec = MP3InitDecoder();
+    HMP3Decoder mp3 = MP3InitDecoder();
+    HAACDecoder aac = NULL;                                             /* made on the first AAC stream (~60 KB PSRAM) */
     uint8_t *in = heap_caps_malloc(8192, MALLOC_CAP_SPIRAM);
-    int16_t *pcm = heap_caps_malloc(2304 * 2, MALLOC_CAP_SPIRAM);
+    int16_t *pcm = heap_caps_malloc(4096 * 2, MALLOC_CAP_SPIRAM);       /* AAC+SBR stereo: 2 x 2048 */
     int16_t *out = heap_caps_malloc(4096 * 2, MALLOC_CAP_SPIRAM);
     for (;;) {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
         int gen = s_rd_gen;
-        if (!dec || !in || !pcm || !out) { rd_fail("内存不足"); continue; }
+        bool is_aac = s_rd_aac;
+        if (is_aac && !aac) aac = AACInitDecoder();
+        else if (is_aac) AACFlushCodec(aac);
+        if (!mp3 || !in || !pcm || !out || (is_aac && !aac)) { rd_fail("内存不足"); continue; }
         while (s_rd_play && gen == s_rd_gen && xStreamBufferBytesAvailable(s_rd_sb) < RD_PREBUF && s_rd_state != 5)
-            vTaskDelay(pdMS_TO_TICKS(50));                              /* pre-buffer ~1.5 s */
+            vTaskDelay(pdMS_TO_TICKS(50));                              /* pre-buffer */
         int have = 0;
         uint32_t phase = 0;                                             /* resampler position, 16.16 */
         int16_t last = 0;
@@ -223,23 +254,40 @@ static void decoder_task(void *arg)
                     vTaskDelay(pdMS_TO_TICKS(50));
                 continue;
             }
-            int sync = MP3FindSyncWord(in, have);
-            if (sync < 0) { have = 0; continue; }
-            const unsigned char *p = in + sync;
-            size_t left = have - sync;
-            int err = MP3Decode(dec, &p, &left, (short *)pcm, 0);
-            int used = p - in;
-            memmove(in, p, left);
-            have = (int)left;
-            if (err == ERR_MP3_INDATA_UNDERFLOW || err == ERR_MP3_MAINDATA_UNDERFLOW) continue;
-            if (err) { if (used == sync) { if (have) { memmove(in, in + 1, --have); } } continue; }   /* skip a bad frame */
-            MP3FrameInfo fi;
-            MP3GetLastFrameInfo(dec, &fi);
-            if (fi.samprate <= 0 || fi.outputSamps <= 0) continue;
-            int n = fi.outputSamps / fi.nChans;
-            if (fi.nChans == 2) for (int i = 0; i < n; i++) pcm[i] = (pcm[2 * i] + pcm[2 * i + 1]) / 2;
-            /* linear resample to 24 kHz */
-            uint32_t step = ((uint32_t)fi.samprate << 16) / 24000;
+            int rate, ch, nout;
+            if (is_aac) {
+                int sync = AACFindSyncWord(in, have);
+                if (sync < 0) { have = 0; continue; }
+                unsigned char *p = in + sync;
+                int left = have - sync;
+                int err = AACDecode(aac, &p, &left, pcm);
+                memmove(in, p, left);
+                have = left;
+                if (err == ERR_AAC_INDATA_UNDERFLOW) continue;
+                if (err) { if (have) memmove(in, in + 1, --have); continue; }    /* skip a bad frame */
+                AACFrameInfo fi;
+                AACGetLastFrameInfo(aac, &fi);
+                rate = fi.sampRateOut; ch = fi.nChans; nout = fi.outputSamps;
+            } else {
+                int sync = MP3FindSyncWord(in, have);
+                if (sync < 0) { have = 0; continue; }
+                const unsigned char *p = in + sync;
+                size_t left = have - sync;
+                int err = MP3Decode(mp3, &p, &left, (short *)pcm, 0);
+                int used = p - in;
+                memmove(in, p, left);
+                have = (int)left;
+                if (err == ERR_MP3_INDATA_UNDERFLOW || err == ERR_MP3_MAINDATA_UNDERFLOW) continue;
+                if (err) { if (used == sync) { if (have) { memmove(in, in + 1, --have); } } continue; }
+                MP3FrameInfo fi;
+                MP3GetLastFrameInfo(mp3, &fi);
+                rate = fi.samprate; ch = fi.nChans; nout = fi.outputSamps;
+            }
+            if (rate <= 0 || nout <= 0 || ch <= 0) continue;
+            int n = nout / ch;
+            if (ch == 2) for (int i = 0; i < n; i++) pcm[i] = (pcm[2 * i] + pcm[2 * i + 1]) / 2;
+            /* linear resample to the speaker's 24 kHz */
+            uint32_t step = ((uint32_t)rate << 16) / 24000;
             int o = 0;
             while (o < 4096) {
                 uint32_t idx = phase >> 16;
@@ -319,10 +367,9 @@ static void rd_close(void)
     store_save();                       /* station + volume */
 }
 
-/* ---------------- 找电台: Radio Browser directory (free, no key), MP3 stations only ----------------
- * The watch can only decode MP3, so the search asks for codec=MP3. A station picked here becomes
+/* ---------------- 找电台: Radio Browser directory (free, no key) ----------------
+ * MP3 and AAC / HE-AAC streams (what the watch decodes); HLS is skipped. A station picked here becomes
  * the custom station (same slot the phone page fills) and starts playing. */
-#include "cJSON.h"
 #define FIND_MAX 20
 typedef struct { char name[48]; char url[128]; int kbps; } found_t;
 static found_t *s_found;
@@ -332,34 +379,87 @@ static char s_find_cc[3] = "SG";
 static lv_obj_t *s_find, *s_find_list, *s_find_st, *s_find_tab[2];
 static lv_timer_t *s_find_tm;
 
-static void find_task(void *arg)
+/* GET https://<mirror>/json/... into buf; returns length or -1 */
+static int rb_get(const char *path, char *buf, int cap)
 {
     static const char *HOSTS[] = {"de1.api.radio-browser.info", "fi1.api.radio-browser.info", "nl1.api.radio-browser.info"};
-    char url[220];
-    char *buf = heap_caps_malloc(64 * 1024, MALLOC_CAP_SPIRAM);
+    char url[260];
+    int len = -1;
+    for (int h = 0; h < 3 && len <= 0; h++) {
+        snprintf(url, sizeof(url), "https://%s%s", HOSTS[h], path);
+        esp_http_client_config_t cfg = { .url = url, .timeout_ms = 10000, .crt_bundle_attach = esp_crt_bundle_attach,
+                                         .buffer_size = 4096, .buffer_size_tx = 1024 };
+        esp_http_client_handle_t c = esp_http_client_init(&cfg);
+        if (!c) continue;
+        esp_http_client_set_header(c, "User-Agent", "FishWatch/1.0");
+        if (esp_http_client_open(c, 0) == ESP_OK) {
+            esp_http_client_fetch_headers(c);
+            if (esp_http_client_get_status_code(c) == 200) {
+                len = 0;
+                int r;
+                while (len < cap - 1 && (r = esp_http_client_read(c, buf + len, cap - 1 - len)) > 0) len += r;
+                buf[len] = 0;
+            }
+        }
+        esp_http_client_close(c);
+        esp_http_client_cleanup(c);
+    }
+    return len;
+}
+
+/* MP3 or AAC (incl. HE-AAC), not HLS / playlists, and short enough to store */
+static bool rb_playable(void *js, const char **url)
+{
+    cJSON *it = js;
+    const char *u = cJSON_GetStringValue(cJSON_GetObjectItem(it, "url_resolved"));
+    const char *codec = cJSON_GetStringValue(cJSON_GetObjectItem(it, "codec"));
+    cJSON *hls = cJSON_GetObjectItem(it, "hls");
+    if (!u || !u[0] || strlen(u) >= 128 || strstr(u, ".m3u8") || strstr(u, ".pls") || strstr(u, ".m3u")) return false;
+    if (cJSON_IsNumber(hls) && hls->valueint) return false;
+    if (codec && codec[0] && strcmp(codec, "MP3") && strcmp(codec, "AAC") && strcmp(codec, "AAC+") && strcmp(codec, "UNKNOWN")) return false;
+    *url = u;
+    return true;
+}
+
+static void rb_url_enc(const char *in, char *out, int n)
+{
+    int o = 0;
+    for (; *in && o < n - 4; in++) {
+        unsigned char c = *in;
+        if ((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '-' || c == '.') out[o++] = c;
+        else o += snprintf(out + o, n - o, "%%%02X", c);
+    }
+    out[o] = 0;
+}
+
+static void rb_lookup(const char *q, const char *cc, char *out, int outlen)
+{
+    char path[200], qe[64];
+    char *buf = heap_caps_malloc(32 * 1024, MALLOC_CAP_SPIRAM);
+    if (!buf) return;
+    rb_url_enc(q, qe, sizeof(qe));
+    snprintf(path, sizeof(path), "/json/stations/search?name=%s&countrycode=%s&hidebroken=true&order=clickcount&reverse=true&limit=10", qe, cc);
+    int len = rb_get(path, buf, 32 * 1024);
+    cJSON *j = len > 0 ? cJSON_Parse(buf) : NULL;
+    cJSON *it;
+    cJSON_ArrayForEach(it, j) {
+        const char *u;
+        if (rb_playable(it, &u)) { snprintf(out, outlen, "%s", u); break; }
+    }
+    cJSON_Delete(j);
+    free(buf);
+    ESP_LOGI(RTAG, "lookup %s/%s -> %s", q, cc, out[0] ? out : "(none, using fallback)");
+}
+
+static void find_task(void *arg)
+{
+    char path[200];
+    char *buf = heap_caps_malloc(96 * 1024, MALLOC_CAP_SPIRAM);
     int len = -1;
     net_wifi_use(true);
     if (buf && net_wait_connected(30000)) {
-        for (int h = 0; h < 3 && len <= 0; h++) {
-            snprintf(url, sizeof(url), "https://%s/json/stations/search?countrycode=%s&codec=MP3&hidebroken=true"
-                     "&order=clickcount&reverse=true&limit=40", HOSTS[h], s_find_cc);
-            esp_http_client_config_t cfg = { .url = url, .timeout_ms = 10000, .crt_bundle_attach = esp_crt_bundle_attach,
-                                             .buffer_size = 4096, .buffer_size_tx = 1024 };
-            esp_http_client_handle_t c = esp_http_client_init(&cfg);
-            if (!c) continue;
-            esp_http_client_set_header(c, "User-Agent", "FishWatch/1.0");
-            if (esp_http_client_open(c, 0) == ESP_OK) {
-                esp_http_client_fetch_headers(c);
-                if (esp_http_client_get_status_code(c) == 200) {
-                    len = 0;
-                    int r;
-                    while (len < 64 * 1024 - 1 && (r = esp_http_client_read(c, buf + len, 64 * 1024 - 1 - len)) > 0) len += r;
-                    buf[len] = 0;
-                }
-            }
-            esp_http_client_close(c);
-            esp_http_client_cleanup(c);
-        }
+        snprintf(path, sizeof(path), "/json/stations/search?countrycode=%s&hidebroken=true&order=clickcount&reverse=true&limit=60", s_find_cc);
+        len = rb_get(path, buf, 96 * 1024);
     }
     net_wifi_use(false);
     int n = 0;
@@ -367,9 +467,8 @@ static void find_task(void *arg)
     cJSON *it;
     cJSON_ArrayForEach(it, j) {
         if (n >= FIND_MAX) break;
-        const char *nm = cJSON_GetStringValue(cJSON_GetObjectItem(it, "name"));
-        const char *u = cJSON_GetStringValue(cJSON_GetObjectItem(it, "url_resolved"));
-        if (!nm || !u || !u[0] || strlen(u) >= sizeof(s_found[0].url) || strstr(u, ".m3u8") || strstr(u, ".pls")) continue;
+        const char *nm = cJSON_GetStringValue(cJSON_GetObjectItem(it, "name")), *u;
+        if (!nm || !rb_playable(it, &u)) continue;
         while (*nm == ' ' || *nm == '\t') nm++;
         snprintf(s_found[n].name, sizeof(s_found[n].name), "%s", nm);
         snprintf(s_found[n].url, sizeof(s_found[n].url), "%s", u);
@@ -409,7 +508,7 @@ static void find_paint(lv_timer_t *t)
     if (s_find_state != 2) return;
     s_find_state = 0;
     lv_obj_clean(s_find_list);
-    lv_label_set_text_fmt(s_find_st, s_nfound ? "找到 %d 台，点一下播放（会存成自订电台）" : "这个地区没有手表能播的 MP3 电台", s_nfound);
+    lv_label_set_text_fmt(s_find_st, s_nfound ? "找到 %d 台，点一下播放（会存成自订电台）" : "这个地区没有手表能播的电台", s_nfound);
     for (int i = 0; i < s_nfound; i++) {
         char t[80];
         snprintf(t, sizeof(t), s_found[i].kbps ? "%s · %dk" : "%s", s_found[i].name, s_found[i].kbps);
